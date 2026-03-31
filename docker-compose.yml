@@ -1,0 +1,91 @@
+services:
+  # ============ FastAPI Backend ============
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dm-automation-api
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import http.client; c = http.client.HTTPConnection('localhost', 8000); c.request('GET', '/health'); r = c.getresponse(); exit(0 if r.status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - dm-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ============ Celery Worker ============
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dm-automation-worker
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - dm-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ============ Celery Beat Scheduler ============
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: dm-automation-beat
+    command: >
+      celery -A app.tasks.celery_app beat
+      --loglevel=info
+      --schedule=/tmp/celerybeat-schedule
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - dm-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ============ Nginx Reverse Proxy ============
+  nginx:
+    image: nginx:alpine
+    container_name: dm-automation-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/certbot:/var/www/certbot:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - dm-network
+
+networks:
+  dm-network:
+    driver: bridge

@@ -1,0 +1,1 @@
+"""DM Automation core module."""

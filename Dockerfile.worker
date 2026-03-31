@@ -1,0 +1,43 @@
+# Celery worker Dockerfile
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc g++ make \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Production stage
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
+
+COPY --chown=appuser:appuser . .
+
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD celery -A app.tasks.celery_app inspect ping --timeout 10 || exit 1
+
+# Default: run worker. Override in docker-compose for beat.
+CMD ["celery", "-A", "app.tasks.celery_app", "worker", \
+     "--loglevel=info", \
+     "--concurrency=4", \
+     "--max-tasks-per-child=1000", \
+     "-Q", "default,webhooks,dm_sending,follow_ups,analytics"]
