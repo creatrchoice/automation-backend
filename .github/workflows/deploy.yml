@@ -1,89 +1,43 @@
-name: Build & Deploy to Azure VM
+name: Deploy to Azure VM
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # Manual trigger
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  workflow_dispatch:  # Manual trigger from GitHub UI
 
 jobs:
-  # ============ Step 1: Build & Push Docker Images ============
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build & push API image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build & push Worker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.worker
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/worker:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/worker:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ============ Step 2: Deploy to Azure VM via SSH ============
   deploy:
-    needs: build
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to Azure VM
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.AZURE_VM_HOST }}
-          username: ${{ secrets.AZURE_VM_USER }}
-          key: ${{ secrets.AZURE_VM_SSH_KEY }}
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
           script: |
-            cd /home/${{ secrets.AZURE_VM_USER }}/dm-automation
+            cd ~/dm-automation
 
-            # Login to GHCR
-            echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Pull latest code
+            git pull origin main
 
-            # Pull latest images
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api:latest
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/worker:latest
-
-            # Update docker-compose to use pulled images
+            # Rebuild and restart containers
             docker compose down
-            docker compose up -d
+            docker compose up --build -d
 
-            # Verify health
-            sleep 10
-            curl -f http://localhost:8000/health || echo "Health check failed!"
+            # Wait for health check
+            echo "Waiting for API to start..."
+            for i in {1..30}; do
+              if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+                echo "✅ API is healthy!"
+                break
+              fi
+              sleep 2
+            done
+
+            # Show running containers
+            docker compose ps
 
             # Cleanup old images
             docker image prune -f
