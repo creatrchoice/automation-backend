@@ -7,7 +7,9 @@ from typing import Optional
 from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
+from fastapi.responses import RedirectResponse
 import httpx
+from urllib.parse import urlencode
 
 from app.core.config import dm_settings
 from app.api.deps import (
@@ -453,23 +455,30 @@ async def instagram_callback(
                 str(profile_data),
             )
 
-            return {
-                "account_id": account_id,
-                "ig_user_id": ig_user_id,
-                "username": profile_data.get("username"),
-                "name": profile_data.get("name"),
-                "account_type": account_type,
-                "followers_count": profile_data.get("followers_count"),
+            # Redirect back to frontend with success params
+            params = urlencode({
                 "status": "connected",
-            }
+                "username": profile_data.get("username", ""),
+                "account_id": account_id,
+            })
+            return RedirectResponse(
+                url=f"{dm_settings.FRONTEND_URL}/auth/redirect?{params}",
+                status_code=302,
+            )
 
-    except HTTPException:
-        raise
+    except HTTPException as he:
+        # Redirect to frontend with error
+        params = urlencode({"status": "error", "message": he.detail})
+        return RedirectResponse(
+            url=f"{dm_settings.FRONTEND_URL}/auth/redirect?{params}",
+            status_code=302,
+        )
     except Exception as e:
         logger.error(f"OAuth callback error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process OAuth callback",
+        params = urlencode({"status": "error", "message": "Failed to connect Instagram account"})
+        return RedirectResponse(
+            url=f"{dm_settings.FRONTEND_URL}/auth/redirect?{params}",
+            status_code=302,
         )
 
 

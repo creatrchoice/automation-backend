@@ -98,6 +98,12 @@ class DMAutomationSettings(BaseSettings):
     ANALYTICS_RETENTION_DAYS: int = Field(default=90, description="Days to retain detailed analytics")
     PERFORMANCE_TRACKING_ENABLED: bool = Field(default=True, description="Enable latency tracking")
 
+    # ===== Frontend =====
+    FRONTEND_URL: str = Field(
+        default="http://localhost:5173",
+        description="Frontend URL for OAuth redirects"
+    )
+
     # ===== CORS =====
     CORS_ORIGINS: str = Field(
         default="http://localhost:3000,http://localhost:5173",
