@@ -17,20 +17,23 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
-            cd ~/dm-automation
+            cd ~/automation-backend
 
             # Pull latest code
             git pull origin main
 
-            # Rebuild and restart containers
+            # Make sure Docker is running
+            sudo systemctl start docker
+
+            # Rebuild and restart only DM automation containers
             docker compose down
             docker compose up --build -d
 
-            # Wait for health check
+            # Wait for health check (port 8001 on host → 8000 in container)
             echo "Waiting for API to start..."
-            for i in {1..30}; do
-              if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
-                echo "✅ API is healthy!"
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost:8001/health > /dev/null 2>&1; then
+                echo "API is healthy!"
                 break
               fi
               sleep 2
