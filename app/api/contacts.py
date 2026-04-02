@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/contacts", tags=["Contacts"])
 
-CONTACTS_CONTAINER = "dm_contacts"
-MESSAGES_CONTAINER = "dm_messages"
-INSTAGRAM_TOKEN_CONTAINER = "instagram_accounts"
+from app.db.cosmos_containers import CONTAINER_CONTACTS, CONTAINER_MESSAGE_LOGS, CONTAINER_IG_ACCOUNTS
+CONTACTS_CONTAINER = CONTAINER_CONTACTS
+MESSAGES_CONTAINER = CONTAINER_MESSAGE_LOGS
+INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 
 
 @router.get("")

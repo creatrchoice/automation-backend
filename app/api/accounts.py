@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
 
-INSTAGRAM_TOKEN_CONTAINER = "instagram_accounts"
+from app.db.cosmos_containers import CONTAINER_IG_ACCOUNTS
+INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 
 
 @router.get("")

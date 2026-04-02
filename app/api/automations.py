@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/automations", tags=["Automations"])
 
-AUTOMATIONS_CONTAINER = "automations"
-INSTAGRAM_TOKEN_CONTAINER = "instagram_accounts"
+from app.db.cosmos_containers import CONTAINER_AUTOMATIONS, CONTAINER_IG_ACCOUNTS
+AUTOMATIONS_CONTAINER = CONTAINER_AUTOMATIONS
+INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

@@ -17,6 +17,7 @@ from app.api.deps import (
     get_cosmos_client,
     create_access_token,
 )
+from app.db.cosmos_containers import CONTAINER_USERS, CONTAINER_IG_ACCOUNTS
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,8 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 # Constants
 CSRF_STATE_EXPIRY = 600  # 10 minutes
-INSTAGRAM_TOKEN_CONTAINER = "instagram_accounts"
-USERS_CONTAINER = "users"
+INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
+USERS_CONTAINER = CONTAINER_USERS
 
 
 class AuthRequest:
@@ -127,6 +128,7 @@ async def signup(
         user_id = email.replace("@", "_").replace(".", "_")
         user_doc = {
             "id": user_id,
+            "partition_key": "user",
             "email": email,
             "password_hash": password_hash,
             "created_at": None,  # Would be set by Cosmos DB
