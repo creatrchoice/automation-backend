@@ -257,11 +257,13 @@ async def get_instagram_state(
         await redis_client.setex(redis_key, CSRF_STATE_EXPIRY, "pending")
 
         # Generate Instagram authorization URL
+        # Using updated scopes for Instagram API with Instagram Login (Jan 2025+)
+        # Old scopes (instagram_basic, instagram_manage_messages, pages_*) are deprecated
         auth_url = (
-            f"https://api.instagram.com/oauth/authorize"
+            f"https://www.instagram.com/oauth/authorize"
             f"?client_id={dm_settings.INSTAGRAM_APP_ID}"
             f"&redirect_uri={dm_settings.INSTAGRAM_REDIRECT_URI}"
-            f"&scope=instagram_basic,instagram_manage_messages,instagram_manage_comments,pages_manage_metadata,pages_messaging"
+            f"&scope=instagram_business_basic,instagram_business_manage_messages"
             f"&response_type=code"
             f"&state={state}"
         )
@@ -279,7 +281,7 @@ async def get_instagram_state(
         )
 
 
-@router.post("/instagram/callback")
+@router.get("/instagram/callback")
 async def instagram_callback(
     code: str,
     state: str,
@@ -289,16 +291,14 @@ async def instagram_callback(
     """
     Handle Instagram OAuth callback.
 
-    Full OAuth flow:
+    Uses Instagram API with Instagram Login (no Facebook Page required).
+    Flow:
     1. Verify CSRF state from Redis
     2. Exchange code for short-lived token
-    3. Exchange short token for long-lived token
+    3. Exchange short token for long-lived token (60-day expiry)
     4. Fetch user profile information
-    5. Validate account type (CREATOR or BUSINESS only)
-    6. Find connected Facebook page
-    7. Subscribe to webhooks
-    8. Encrypt and store token in Cosmos DB
-    9. Cache account mapping in Redis
+    5. Store token and account info in Cosmos DB
+    6. Cache account mapping in Redis
 
     Args:
         code: Authorization code from Instagram
@@ -312,7 +312,6 @@ async def instagram_callback(
     Status Codes:
         200: Account connected successfully
         400: Invalid state or callback parameters
-        401: Account type not supported
         500: Server error
     """
     try:
@@ -353,7 +352,7 @@ async def instagram_callback(
 
             token_data = token_response.json()
             short_token = token_data.get("access_token")
-            ig_user_id = token_data.get("user_id")
+            ig_user_id = str(token_data.get("user_id"))
 
             if not short_token or not ig_user_id:
                 raise HTTPException(
@@ -361,7 +360,8 @@ async def instagram_callback(
                     detail="Missing token or user ID in response",
                 )
 
-            # Step 3: Exchange short token for long-lived token
+            # Step 3: Exchange short-lived token for long-lived token (60 days)
+            # Server-side only — never expose app secret to client
             long_token_response = await client.get(
                 "https://graph.instagram.com/access_token",
                 params={
@@ -382,6 +382,8 @@ async def instagram_callback(
 
             long_token_data = long_token_response.json()
             long_token = long_token_data.get("access_token")
+            # Long-lived tokens expire in 60 days
+            expires_in = long_token_data.get("expires_in", 5184000)
 
             if not long_token:
                 raise HTTPException(
@@ -389,9 +391,10 @@ async def instagram_callback(
                     detail="Failed to obtain long-lived token",
                 )
 
-            # Step 4: Fetch user profile information
+            # Step 4: Fetch user profile using Instagram API with Instagram Login
+            # No Facebook Page needed — query directly with Instagram user token
             profile_response = await client.get(
-                f"https://graph.instagram.com/v21.0/{ig_user_id}",
+                f"https://graph.instagram.com/v21.0/me",
                 params={
                     "fields": "user_id,username,name,account_type,profile_picture_url,followers_count",
                     "access_token": long_token,
@@ -410,70 +413,27 @@ async def instagram_callback(
             profile_data = profile_response.json()
             account_type = profile_data.get("account_type")
 
-            # Step 5: Validate account type
+            # Only Business and Creator accounts can use the messaging API
             if account_type not in ["CREATOR", "BUSINESS"]:
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Account type '{account_type}' not supported. Only CREATOR and BUSINESS accounts are allowed.",
-                )
-
-            # Step 6: Get Facebook page ID
-            pages_response = await client.get(
-                f"https://graph.instagram.com/v21.0/me/accounts",
-                params={"access_token": long_token},
-            )
-
-            if pages_response.status_code != 200:
-                logger.error(
-                    f"Pages fetch failed: {pages_response.text}"
-                )
-                raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to fetch connected pages",
+                    detail=f"Account type '{account_type}' not supported. Only CREATOR and BUSINESS accounts can use messaging.",
                 )
 
-            pages_data = pages_response.json()
-            accounts = pages_data.get("data", [])
-
-            if not accounts:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No connected Facebook pages found",
-                )
-
-            page_id = accounts[0].get("id")
-
-            # Step 7: Subscribe to webhooks
-            webhook_fields = ["messages", "messaging_postbacks", "feed"]
-            subscribe_response = await client.post(
-                f"https://graph.instagram.com/v21.0/{page_id}/subscribed_apps",
-                params={
-                    "subscribed_fields": ",".join(webhook_fields),
-                    "access_token": long_token,
-                },
-            )
-
-            if subscribe_response.status_code not in [200, 201]:
-                logger.warning(
-                    f"Webhook subscription failed: {subscribe_response.text}"
-                )
-
-            # Step 8: Encrypt and store token in Cosmos DB
-            # In production, use proper encryption (e.g., Azure Key Vault)
+            # Step 5: Store token and account info in Cosmos DB
+            # No Facebook Page ID needed with Instagram Login flow
             account_id = f"instagram_{ig_user_id}"
             account_doc = {
                 "id": account_id,
                 "type": "instagram_account",
                 "ig_user_id": ig_user_id,
-                "page_id": page_id,
                 "username": profile_data.get("username"),
                 "name": profile_data.get("name"),
                 "account_type": account_type,
                 "profile_picture_url": profile_data.get("profile_picture_url"),
                 "followers_count": profile_data.get("followers_count"),
-                "access_token": long_token,  # In production: encrypt this
-                "token_expires_at": None,  # Long-lived tokens don't expire
-                "webhook_subscribed": True,
+                "access_token": long_token,  # TODO: encrypt with Azure Key Vault
+                "token_expires_in": expires_in,
                 "status": "active",
                 "created_at": None,
                 "updated_at": None,
@@ -482,9 +442,11 @@ async def instagram_callback(
             accounts_container = await cosmos_client.get_async_container_client(
                 INSTAGRAM_TOKEN_CONTAINER
             )
-            await accounts_container.create_item(body=account_doc)
 
-            # Step 9: Cache account mapping in Redis
+            # Upsert so reconnecting doesn't fail
+            await accounts_container.upsert_item(body=account_doc)
+
+            # Step 6: Cache account mapping in Redis
             await redis_client.setex(
                 f"account:{account_id}",
                 86400 * 30,  # 30 days
