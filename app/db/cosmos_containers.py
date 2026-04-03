@@ -52,6 +52,16 @@ class DMContainers:
             "partition_key": PartitionKey(path="/account_id"),
             "description": "Daily analytics aggregates",
             "throughput": 400
+        },
+        "dm_organizations": {
+            "partition_key": PartitionKey(path="/id"),
+            "description": "Organizations / workspaces with members and roles",
+            "throughput": 400
+        },
+        "dm_invitations": {
+            "partition_key": PartitionKey(path="/org_id"),
+            "description": "Pending team invitation tokens",
+            "throughput": 400
         }
     }
 
@@ -180,6 +190,8 @@ CONTAINER_MESSAGE_LOGS = "dm_message_logs"
 CONTAINER_WEBHOOK_EVENTS = "dm_webhook_events"
 CONTAINER_SCHEDULED_TASKS = "dm_scheduled_tasks"
 CONTAINER_ANALYTICS = "dm_analytics"
+CONTAINER_ORGANIZATIONS = "dm_organizations"
+CONTAINER_INVITATIONS = "dm_invitations"
 
 ALL_CONTAINERS = [
     CONTAINER_USERS,
@@ -190,6 +202,8 @@ ALL_CONTAINERS = [
     CONTAINER_WEBHOOK_EVENTS,
     CONTAINER_SCHEDULED_TASKS,
     CONTAINER_ANALYTICS,
+    CONTAINER_ORGANIZATIONS,
+    CONTAINER_INVITATIONS,
 ]
 
 

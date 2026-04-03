@@ -98,6 +98,14 @@ class DMAutomationSettings(BaseSettings):
     ANALYTICS_RETENTION_DAYS: int = Field(default=90, description="Days to retain detailed analytics")
     PERFORMANCE_TRACKING_ENABLED: bool = Field(default=True, description="Enable latency tracking")
 
+    # ===== Email (Resend) =====
+    RESEND_API_KEY: str = Field(default="", description="Resend API key for sending emails")
+    EMAIL_FROM_NAME: str = Field(default="Sharda", description="Sender display name")
+    EMAIL_FROM_ADDRESS: str = Field(default="sharda@creatrchoice.info", description="Sender email address")
+
+    # ===== Team / Organization =====
+    INVITE_TOKEN_EXPIRY_HOURS: int = Field(default=72, description="Invitation link expiry in hours")
+
     # ===== Frontend =====
     FRONTEND_URL: str = Field(
         default="http://localhost:5173",

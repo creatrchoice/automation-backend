@@ -55,29 +55,32 @@ async def create_automation(
     try:
         user_id = current_user.get("sub")
 
-        # Verify account ownership
+        # Verify account ownership using partition key for correct Cosmos DB routing
+        # (dm_ig_accounts is partitioned by /user_id — querying by id without
+        #  the partition key can route to the wrong partition and return a
+        #  document belonging to a different user)
         accounts_container = await cosmos_client.get_async_container_client(
             INSTAGRAM_TOKEN_CONTAINER
         )
-        query = "SELECT * FROM accounts WHERE accounts.id = @account_id"
+        query = (
+            "SELECT * FROM accounts "
+            "WHERE accounts.id = @account_id AND accounts.user_id = @user_id"
+        )
         accounts = []
         async for item in accounts_container.query_items(
             query=query,
-            parameters=[{"name": "@account_id", "value": account_id}],
+            parameters=[
+                {"name": "@account_id", "value": account_id},
+                {"name": "@user_id", "value": user_id},
+            ],
+            partition_key=user_id,
         ):
             accounts.append(item)
 
         if not accounts:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Account not found",
-            )
-
-        account = accounts[0]
-        if account.get("user_id") != user_id:
-            raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied",
+                detail="Account not found or access denied",
             )
 
         # Validate input
@@ -156,29 +159,29 @@ async def list_automations(
     try:
         user_id = current_user.get("sub")
 
-        # Verify account ownership
+        # Verify account ownership using partition key for correct Cosmos DB routing
         accounts_container = await cosmos_client.get_async_container_client(
             INSTAGRAM_TOKEN_CONTAINER
         )
-        query = "SELECT * FROM accounts WHERE accounts.id = @account_id"
+        query = (
+            "SELECT * FROM accounts "
+            "WHERE accounts.id = @account_id AND accounts.user_id = @user_id"
+        )
         accounts = []
         async for item in accounts_container.query_items(
             query=query,
-            parameters=[{"name": "@account_id", "value": account_id}],
+            parameters=[
+                {"name": "@account_id", "value": account_id},
+                {"name": "@user_id", "value": user_id},
+            ],
+            partition_key=user_id,
         ):
             accounts.append(item)
 
         if not accounts:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Account not found",
-            )
-
-        account = accounts[0]
-        if account.get("user_id") != user_id:
-            raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied",
+                detail="Account not found or access denied",
             )
 
         # Build query

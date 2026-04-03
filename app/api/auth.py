@@ -3,21 +3,31 @@ import logging
 import hmac
 import hashlib
 import secrets
+import uuid
 from typing import Optional
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, status, Depends, Query
+from fastapi import APIRouter, Request, status, Depends, Query
 from fastapi.responses import RedirectResponse
 import httpx
 from urllib.parse import urlencode
 
 from app.core.config import dm_settings
+from app.core.errors import (
+    ValidationError,
+    InvalidCredentialsError,
+    DuplicateEntityError,
+    BadRequestError,
+    InternalServerError,
+    ExternalServiceError,
+)
 from app.api.deps import (
     get_redis_client,
     get_cosmos_client,
     create_access_token,
+    get_current_user,
 )
-from app.db.cosmos_containers import CONTAINER_USERS, CONTAINER_IG_ACCOUNTS
+from app.db.cosmos_containers import CONTAINER_USERS, CONTAINER_IG_ACCOUNTS, CONTAINER_ORGANIZATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -29,41 +39,19 @@ INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 USERS_CONTAINER = CONTAINER_USERS
 
 
-class AuthRequest:
-    """Request models (using Pydantic for validation would be better in production)."""
-
-    @staticmethod
-    def signup_schema():
-        return {
-            "type": "object",
-            "properties": {
-                "email": {"type": "string", "format": "email"},
-                "password": {"type": "string", "minLength": 8},
-            },
-            "required": ["email", "password"],
-        }
-
-    @staticmethod
-    def login_schema():
-        return {
-            "type": "object",
-            "properties": {
-                "email": {"type": "string", "format": "email"},
-                "password": {"type": "string"},
-            },
-            "required": ["email", "password"],
-        }
-
-    @staticmethod
-    def callback_schema():
-        return {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string"},
-                "state": {"type": "string"},
-            },
-            "required": ["code", "state"],
-        }
+async def _find_user_org_id(cosmos_client, user_id: str) -> Optional[str]:
+    """Look up the user's organization id (if any). Returns None if not a member of any org."""
+    try:
+        org_container = await cosmos_client.get_async_container_client(CONTAINER_ORGANIZATIONS)
+        query = "SELECT o.id FROM o JOIN m IN o.members WHERE m.user_id = @uid"
+        async for item in org_container.query_items(
+            query=query,
+            parameters=[{"name": "@uid", "value": user_id}],
+        ):
+            return item.get("id")
+    except Exception as e:
+        logger.error(f"Could not look up org for user {user_id}: {e}", exc_info=True)
+    return None
 
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
@@ -73,37 +61,24 @@ async def signup(
     cosmos_client=Depends(get_cosmos_client),
     redis_client=Depends(get_redis_client),
 ):
-    """
-    Sign up new user with email and password.
+    """Sign up new user with email and password."""
+    # Validate email format
+    if not email or "@" not in email:
+        raise ValidationError(
+            message="Invalid email format",
+            user_title="Invalid Email",
+            user_message="Please enter a valid email address.",
+        )
 
-    Args:
-        email: User email address
-        password: User password (minimum 8 characters)
-        cosmos_client: Cosmos DB client
-        redis_client: Redis client
+    # Validate password length
+    if len(password) < 8:
+        raise ValidationError(
+            message="Password too short",
+            user_title="Weak Password",
+            user_message="Password must be at least 8 characters long.",
+        )
 
-    Returns:
-        dict: User info and JWT token
-
-    Status Codes:
-        201: User created successfully
-        400: Invalid input or user already exists
-        500: Server error
-    """
     try:
-        # Validate email format and password length
-        if not email or "@" not in email:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid email format",
-            )
-
-        if len(password) < 8:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password must be at least 8 characters",
-            )
-
         # Check if user already exists
         users_container = await cosmos_client.get_async_container_client(
             USERS_CONTAINER
@@ -116,12 +91,13 @@ async def signup(
             existing_users.append(item)
 
         if existing_users:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User with this email already exists",
+            raise DuplicateEntityError(
+                message=f"User with email {email} already exists",
+                user_title="Account Exists",
+                user_message="An account with this email already exists. Please sign in instead.",
             )
 
-        # Hash password (in production, use bcrypt)
+        # Hash password
         password_hash = hashlib.sha256(password.encode()).hexdigest()
 
         # Create user document
@@ -131,7 +107,7 @@ async def signup(
             "partition_key": "user",
             "email": email,
             "password_hash": password_hash,
-            "created_at": None,  # Would be set by Cosmos DB
+            "created_at": None,
             "updated_at": None,
             "connected_accounts": [],
         }
@@ -139,26 +115,57 @@ async def signup(
         # Store in Cosmos DB
         await users_container.create_item(body=user_doc)
 
-        # Create JWT token
+        # Check if user is already a member of an org (e.g. invited before signup)
+        org_id = await _find_user_org_id(cosmos_client, user_id)
+
+        # Auto-create an organization if the user doesn't have one
+        if not org_id:
+            now = datetime.now(timezone.utc).isoformat()
+            org_id = str(uuid.uuid4())
+            org_name = email.split("@")[0] + "'s Team"
+            org_doc = {
+                "id": org_id,
+                "name": org_name,
+                "created_by": user_id,
+                "members": [
+                    {
+                        "user_id": user_id,
+                        "email": email,
+                        "role": "owner",
+                        "joined_at": now,
+                    }
+                ],
+                "created_at": now,
+                "updated_at": now,
+            }
+            org_container = await cosmos_client.get_async_container_client(
+                CONTAINER_ORGANIZATIONS
+            )
+            await org_container.create_item(body=org_doc)
+
+        # Create JWT token with org_id
         access_token = create_access_token(
-            data={"sub": user_id, "email": email},
+            data={"sub": user_id, "email": email, "org_id": org_id},
             expires_delta=timedelta(hours=24),
         )
 
         return {
+            "message": "User created successfully",
             "user_id": user_id,
             "email": email,
+            "org_id": org_id,
             "access_token": access_token,
             "token_type": "bearer",
         }
 
-    except HTTPException:
+    except (ValidationError, DuplicateEntityError):
         raise
     except Exception as e:
         logger.error(f"Signup error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create user",
+        raise InternalServerError(
+            message=f"Signup failed: {e}",
+            user_title="Signup Failed",
+            user_message="We couldn't create your account right now. Please try again later.",
         )
 
 
@@ -168,22 +175,7 @@ async def login(
     password: str,
     cosmos_client=Depends(get_cosmos_client),
 ):
-    """
-    Log in user with email and password.
-
-    Args:
-        email: User email address
-        password: User password
-        cosmos_client: Cosmos DB client
-
-    Returns:
-        dict: JWT token and user info
-
-    Status Codes:
-        200: Login successful
-        401: Invalid credentials
-        500: Server error
-    """
+    """Log in user with email and password."""
     try:
         # Find user by email
         users_container = await cosmos_client.get_async_container_client(
@@ -197,72 +189,61 @@ async def login(
             users.append(item)
 
         if not users:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
-            )
+            raise InvalidCredentialsError()
 
         user = users[0]
 
         # Verify password
         password_hash = hashlib.sha256(password.encode()).hexdigest()
         if user.get("password_hash") != password_hash:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
-            )
+            raise InvalidCredentialsError()
+
+        # Look up organization membership
+        org_id = await _find_user_org_id(cosmos_client, user["id"])
 
         # Create JWT token
+        token_data = {"sub": user["id"], "email": user["email"]}
+        if org_id:
+            token_data["org_id"] = org_id
+
         access_token = create_access_token(
-            data={"sub": user["id"], "email": user["email"]},
+            data=token_data,
             expires_delta=timedelta(hours=24),
         )
 
         return {
+            "message": "Login successful",
             "user_id": user["id"],
             "email": user["email"],
+            "org_id": org_id,
             "access_token": access_token,
             "token_type": "bearer",
         }
 
-    except HTTPException:
+    except InvalidCredentialsError:
         raise
     except Exception as e:
         logger.error(f"Login error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Login failed",
+        raise InternalServerError(
+            message=f"Login failed: {e}",
+            user_title="Login Failed",
+            user_message="We couldn't sign you in right now. Please try again later.",
         )
 
 
 @router.get("/instagram/state")
 async def get_instagram_state(
+    current_user: dict = Depends(get_current_user),
     redis_client=Depends(get_redis_client),
 ):
-    """
-    Generate CSRF state token for Instagram OAuth flow.
-
-    This endpoint generates a random state token that must be returned by
-    Instagram during the OAuth callback to prevent CSRF attacks.
-
-    Returns:
-        dict: CSRF state token and redirect URL for Instagram login
-
-    Status Codes:
-        200: State generated successfully
-        500: Server error
-    """
+    """Generate CSRF state token for Instagram OAuth flow."""
     try:
-        # Generate random state token
         state = secrets.token_urlsafe(32)
+        user_id = current_user.get("sub")
 
-        # Store in Redis with expiry (10 minutes)
         redis_key = f"oauth_state:{state}"
-        await redis_client.setex(redis_key, CSRF_STATE_EXPIRY, "pending")
+        await redis_client.setex(redis_key, CSRF_STATE_EXPIRY, user_id)
 
-        # Generate Instagram authorization URL
-        # Using updated scopes for Instagram API with Instagram Login (Jan 2025+)
-        # Old scopes (instagram_basic, instagram_manage_messages, pages_*) are deprecated
         auth_url = (
             f"https://www.instagram.com/oauth/authorize"
             f"?client_id={dm_settings.INSTAGRAM_APP_ID}"
@@ -279,57 +260,36 @@ async def get_instagram_state(
 
     except Exception as e:
         logger.error(f"OAuth state generation error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to generate OAuth state",
+        raise InternalServerError(
+            message=f"OAuth state generation failed: {e}",
+            user_title="Connection Error",
+            user_message="Couldn't start Instagram connection. Please try again.",
         )
 
 
 @router.get("/instagram/callback")
 async def instagram_callback(
+    request: Request,
     code: str,
     state: str,
     redis_client=Depends(get_redis_client),
     cosmos_client=Depends(get_cosmos_client),
 ):
-    """
-    Handle Instagram OAuth callback.
-
-    Uses Instagram API with Instagram Login (no Facebook Page required).
-    Flow:
-    1. Verify CSRF state from Redis
-    2. Exchange code for short-lived token
-    3. Exchange short token for long-lived token (60-day expiry)
-    4. Fetch user profile information
-    5. Store token and account info in Cosmos DB
-    6. Cache account mapping in Redis
-
-    Args:
-        code: Authorization code from Instagram
-        state: State token for CSRF protection
-        redis_client: Redis client
-        cosmos_client: Cosmos DB client
-
-    Returns:
-        dict: Account information and connection status
-
-    Status Codes:
-        200: Account connected successfully
-        400: Invalid state or callback parameters
-        500: Server error
-    """
+    """Handle Instagram OAuth callback (Instagram Login flow, no Facebook Page required)."""
     try:
         # Step 1: Verify CSRF state
         redis_key = f"oauth_state:{state}"
         state_valid = await redis_client.get(redis_key)
 
         if not state_valid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid or expired state token",
+            raise BadRequestError(
+                message="Invalid or expired OAuth state",
+                user_title="Session Expired",
+                user_message="Your connection session has expired. Please try connecting again.",
             )
 
-        # Delete state token (single-use)
+        # state_valid contains the user_id stored during get_instagram_state
+        owner_user_id = state_valid.decode() if isinstance(state_valid, bytes) else str(state_valid)
         await redis_client.delete(redis_key)
 
         # Step 2: Exchange code for short-lived token
@@ -346,12 +306,11 @@ async def instagram_callback(
             )
 
             if token_response.status_code != 200:
-                logger.error(
-                    f"Token exchange failed: {token_response.text}"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to exchange code for token",
+                logger.error(f"Token exchange failed: {token_response.text}")
+                raise ExternalServiceError(
+                    service="Instagram",
+                    message=f"Token exchange failed: {token_response.text}",
+                    user_message="Instagram couldn't verify your authorization. Please try again.",
                 )
 
             token_data = token_response.json()
@@ -359,13 +318,12 @@ async def instagram_callback(
             ig_user_id = str(token_data.get("user_id"))
 
             if not short_token or not ig_user_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Missing token or user ID in response",
+                raise BadRequestError(
+                    message="Missing token or user ID from Instagram",
+                    user_message="Instagram returned an incomplete response. Please try again.",
                 )
 
-            # Step 3: Exchange short-lived token for long-lived token (60 days)
-            # Server-side only — never expose app secret to client
+            # Step 3: Exchange for long-lived token (60 days)
             long_token_response = await client.get(
                 "https://graph.instagram.com/access_token",
                 params={
@@ -376,27 +334,24 @@ async def instagram_callback(
             )
 
             if long_token_response.status_code != 200:
-                logger.error(
-                    f"Long token exchange failed: {long_token_response.text}"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to get long-lived token",
+                logger.error(f"Long token exchange failed: {long_token_response.text}")
+                raise ExternalServiceError(
+                    service="Instagram",
+                    message=f"Long token exchange failed: {long_token_response.text}",
+                    user_message="Couldn't complete Instagram authorization. Please try again.",
                 )
 
             long_token_data = long_token_response.json()
             long_token = long_token_data.get("access_token")
-            # Long-lived tokens expire in 60 days
             expires_in = long_token_data.get("expires_in", 5184000)
 
             if not long_token:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to obtain long-lived token",
+                raise BadRequestError(
+                    message="Failed to obtain long-lived token",
+                    user_message="Couldn't complete authorization with Instagram.",
                 )
 
-            # Step 4: Fetch user profile using Instagram API with Instagram Login
-            # No Facebook Page needed — query directly with Instagram user token
+            # Step 4: Fetch user profile
             profile_response = await client.get(
                 f"https://graph.instagram.com/v21.0/me",
                 params={
@@ -406,29 +361,28 @@ async def instagram_callback(
             )
 
             if profile_response.status_code != 200:
-                logger.error(
-                    f"Profile fetch failed: {profile_response.text}"
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to fetch profile information",
+                logger.error(f"Profile fetch failed: {profile_response.text}")
+                raise ExternalServiceError(
+                    service="Instagram",
+                    message=f"Profile fetch failed: {profile_response.text}",
+                    user_message="Couldn't fetch your Instagram profile. Please try again.",
                 )
 
             profile_data = profile_response.json()
             account_type = profile_data.get("account_type")
 
-            # Only Business and Creator accounts can use the messaging API
             if account_type not in ["CREATOR", "BUSINESS"]:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Account type '{account_type}' not supported. Only CREATOR and BUSINESS accounts can use messaging.",
+                raise BadRequestError(
+                    message=f"Unsupported account type: {account_type}",
+                    user_title="Account Not Supported",
+                    user_message="Only Creator and Business Instagram accounts can use messaging automation. Please switch your account type and try again.",
                 )
 
-            # Step 5: Store token and account info in Cosmos DB
-            # No Facebook Page ID needed with Instagram Login flow
+            # Step 5: Store in Cosmos DB
             account_id = f"instagram_{ig_user_id}"
             account_doc = {
                 "id": account_id,
+                "user_id": owner_user_id,
                 "type": "instagram_account",
                 "ig_user_id": ig_user_id,
                 "username": profile_data.get("username"),
@@ -436,7 +390,7 @@ async def instagram_callback(
                 "account_type": account_type,
                 "profile_picture_url": profile_data.get("profile_picture_url"),
                 "followers_count": profile_data.get("followers_count"),
-                "access_token": long_token,  # TODO: encrypt with Azure Key Vault
+                "access_token": long_token,
                 "token_expires_in": expires_in,
                 "status": "active",
                 "created_at": None,
@@ -446,38 +400,54 @@ async def instagram_callback(
             accounts_container = await cosmos_client.get_async_container_client(
                 INSTAGRAM_TOKEN_CONTAINER
             )
-
-            # Upsert so reconnecting doesn't fail
             await accounts_container.upsert_item(body=account_doc)
 
-            # Step 6: Cache account mapping in Redis
+            # Step 6: Cache in Redis
             await redis_client.setex(
                 f"account:{account_id}",
-                86400 * 30,  # 30 days
+                86400 * 30,
                 str(profile_data),
             )
 
-            # Redirect back to frontend with success params
-            params = urlencode({
+            # Check if called from frontend API (wants JSON) or browser redirect (Instagram)
+            is_api_call = "application/json" in request.headers.get("accept", "")
+
+            result = {
                 "status": "connected",
                 "username": profile_data.get("username", ""),
                 "account_id": account_id,
-            })
+            }
+
+            if is_api_call:
+                return result
+
+            params = urlencode(result)
             return RedirectResponse(
                 url=f"{dm_settings.FRONTEND_URL}/auth/redirect?{params}",
                 status_code=302,
             )
 
-    except HTTPException as he:
-        # Redirect to frontend with error
-        params = urlencode({"status": "error", "message": he.detail})
+    except (BadRequestError, ExternalServiceError) as exc:
+        is_api_call = "application/json" in request.headers.get("accept", "")
+        if is_api_call:
+            raise exc
+
+        params = urlencode({"status": "error", "message": exc.user_message})
         return RedirectResponse(
             url=f"{dm_settings.FRONTEND_URL}/auth/redirect?{params}",
             status_code=302,
         )
     except Exception as e:
         logger.error(f"OAuth callback error: {e}")
-        params = urlencode({"status": "error", "message": "Failed to connect Instagram account"})
+        is_api_call = "application/json" in request.headers.get("accept", "")
+        if is_api_call:
+            raise InternalServerError(
+                message=f"OAuth callback error: {e}",
+                user_title="Connection Failed",
+                user_message="Failed to connect Instagram account. Please try again.",
+            )
+
+        params = urlencode({"status": "error", "message": "Failed to connect Instagram account. Please try again."})
         return RedirectResponse(
             url=f"{dm_settings.FRONTEND_URL}/auth/redirect?{params}",
             status_code=302,
@@ -490,68 +460,35 @@ async def instagram_data_deletion(
     redis_client=Depends(get_redis_client),
     cosmos_client=Depends(get_cosmos_client),
 ):
-    """
-    Meta required data deletion callback.
-
-    This endpoint handles Meta's data deletion requests as required by their
-    platform policies. When a user deletes their Instagram account, Meta sends
-    a signed request that we must respond to within 30 days.
-
-    Args:
-        signed_request: Meta's signed request containing user data
-
-    Returns:
-        dict: Confirmation that data deletion was processed
-
-    Status Codes:
-        200: Data deletion processed
-        400: Invalid signed request
-        500: Server error
-    """
-    try:
-        # Verify signed request from Meta
-        if not signed_request:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing signed_request parameter",
-            )
-
-        # Parse signed request (format: signature.payload)
-        try:
-            signature, payload = signed_request.split(".")
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid signed_request format",
-            )
-
-        # Verify signature using app secret
-        expected_sig = hmac.new(
-            dm_settings.INSTAGRAM_APP_SECRET.encode(),
-            payload.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-
-        if not hmac.compare_digest(signature, expected_sig):
-            logger.warning("Invalid data deletion request signature")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid signature",
-            )
-
-        # In production, parse payload and delete user data
-        # For now, just confirm receipt
-
-        return {
-            "status": "ok",
-            "message": "Data deletion request received and queued for processing",
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Data deletion error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process data deletion request",
+    """Meta required data deletion callback."""
+    if not signed_request:
+        raise BadRequestError(
+            message="Missing signed_request parameter",
+            user_message="Invalid data deletion request.",
         )
+
+    try:
+        signature, payload = signed_request.split(".")
+    except ValueError:
+        raise BadRequestError(
+            message="Invalid signed_request format",
+            user_message="Invalid data deletion request format.",
+        )
+
+    expected_sig = hmac.new(
+        dm_settings.INSTAGRAM_APP_SECRET.encode(),
+        payload.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected_sig):
+        logger.warning("Invalid data deletion request signature")
+        raise BadRequestError(
+            message="Invalid signature on data deletion request",
+            user_message="Could not verify the data deletion request.",
+        )
+
+    return {
+        "status": "ok",
+        "message": "Data deletion request received and queued for processing",
+    }

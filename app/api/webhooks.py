@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import PlainTextResponse
 
 from app.core.config import dm_settings
+from app.core.errors import ForbiddenError, UnauthorizedError, BadRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -40,36 +41,23 @@ async def verify_instagram_webhook(
         200: Verification successful
         403: Invalid token or mode
     """
-    try:
-        # Validate mode
-        if hub_mode != "subscribe":
-            logger.warning(f"Invalid hub_mode: {hub_mode}")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid hub.mode",
-            )
-
-        # Validate token against our configured verify token
-        if hub_verify_token != dm_settings.WEBHOOK_VERIFY_TOKEN:
-            logger.warning("Invalid verify token received")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid hub.verify_token",
-            )
-
-        # CRITICAL: Return challenge as plain text, not JSON.
-        # Meta expects the raw challenge value in the response body.
-        logger.info("Webhook verification successful")
-        return PlainTextResponse(content=hub_challenge, status_code=200)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Webhook verification error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Webhook verification failed",
+    if hub_mode != "subscribe":
+        logger.warning(f"Invalid hub_mode: {hub_mode}")
+        raise ForbiddenError(
+            message=f"Invalid hub.mode: {hub_mode}",
+            user_message="Webhook verification failed: invalid mode.",
         )
+
+    if hub_verify_token != dm_settings.WEBHOOK_VERIFY_TOKEN:
+        logger.warning("Invalid verify token received")
+        raise ForbiddenError(
+            message="Invalid hub.verify_token",
+            user_message="Webhook verification failed: invalid token.",
+        )
+
+    # CRITICAL: Return challenge as plain text, not JSON.
+    logger.info("Webhook verification successful")
+    return PlainTextResponse(content=hub_challenge, status_code=200)
 
 
 @router.post("/instagram")
@@ -128,27 +116,18 @@ async def receive_instagram_webhook(request: Request):
 
         if not signature_header:
             logger.warning("Missing X-Hub-Signature-256 header")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing signature",
-            )
+            raise UnauthorizedError(message="Missing X-Hub-Signature-256 header")
 
         # Step 3: Parse signature header (format: "sha256=<hex_digest>")
         try:
             scheme, received_signature = signature_header.split("=", 1)
         except ValueError:
             logger.warning(f"Invalid signature header format: {signature_header}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid signature format",
-            )
+            raise UnauthorizedError(message="Invalid signature header format")
 
         if scheme != "sha256":
             logger.warning(f"Invalid signature scheme: {scheme}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid signature scheme",
-            )
+            raise UnauthorizedError(message=f"Invalid signature scheme: {scheme}")
 
         # Step 4: Compute expected HMAC-SHA256 using App Secret
         expected_signature = hmac.new(
@@ -160,28 +139,19 @@ async def receive_instagram_webhook(request: Request):
         # Step 5: Constant-time comparison to prevent timing attacks
         if not hmac.compare_digest(received_signature, expected_signature):
             logger.warning("Webhook signature mismatch - possible tampering")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid signature",
-            )
+            raise UnauthorizedError(message="Webhook signature mismatch")
 
         # Step 6: Parse JSON payload
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON payload: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid JSON",
-            )
+            raise BadRequestError(message=f"Invalid JSON payload: {e}")
 
         # Step 7: Validate it's an Instagram webhook
         if payload.get("object") != "instagram":
             logger.warning(f"Non-Instagram webhook object: {payload.get('object')}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid webhook object",
-            )
+            raise BadRequestError(message=f"Invalid webhook object: {payload.get('object')}")
 
         # Step 8: Enqueue for async processing
         # IMPORTANT: Return 200 immediately. Meta expects response within 20 seconds.
@@ -191,7 +161,7 @@ async def receive_instagram_webhook(request: Request):
         # Meta best practice: return "EVENT_RECEIVED" with 200
         return {"status": "EVENT_RECEIVED"}
 
-    except HTTPException:
+    except (UnauthorizedError, BadRequestError):
         raise
     except Exception as e:
         logger.error(f"Webhook processing error: {e}", exc_info=True)

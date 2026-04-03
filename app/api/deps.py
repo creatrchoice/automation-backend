@@ -3,11 +3,12 @@ import logging
 from typing import Optional
 from datetime import datetime, timedelta
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials as HTTPAuthCredentials
 import jwt
 import redis.asyncio as aioredis
 from app.core.config import dm_settings as settings
+from app.core.errors import UnauthorizedError, TokenExpiredError, InvalidTokenError
 from app.db.cosmos_db import CosmosDBClient
 
 logger = logging.getLogger(__name__)
@@ -51,26 +52,13 @@ async def get_redis_client() -> aioredis.Redis:
 async def get_current_user(
     credentials: Optional[HTTPAuthCredentials] = Depends(security),
 ) -> dict:
-    """
-    Extract and validate JWT token from Authorization header.
-
-    Returns:
-        dict: Decoded JWT payload with user_id, email, etc.
-
-    Raises:
-        HTTPException: If token is missing, invalid, or expired
-    """
+    """Extract and validate JWT token from Authorization header."""
     if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing authorization token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise UnauthorizedError(message="Missing authorization token")
 
     token = credentials.credentials
 
     try:
-        # Decode JWT token
         payload = jwt.decode(
             token,
             settings.JWT_SECRET_KEY,
@@ -79,50 +67,34 @@ async def get_current_user(
 
         user_id: str = payload.get("sub")
         if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token: missing user_id",
-            )
+            raise InvalidTokenError(message="Token missing user_id claim")
 
-        # Check token expiration
         exp = payload.get("exp")
         if exp:
             if datetime.utcfromtimestamp(exp) < datetime.utcnow():
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token has expired",
-                )
+                raise TokenExpiredError()
 
         return payload
 
+    except TokenExpiredError:
+        raise
+    except InvalidTokenError:
+        raise
+    except jwt.ExpiredSignatureError:
+        raise TokenExpiredError()
     except jwt.InvalidTokenError as e:
         logger.warning(f"Invalid token: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
+        raise InvalidTokenError(message=f"Invalid token: {e}")
     except Exception as e:
         logger.error(f"Token validation error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token validation failed",
-        )
+        raise InvalidTokenError(message=f"Token validation failed: {e}")
 
 
 def create_access_token(
     data: dict,
     expires_delta: Optional[timedelta] = None,
 ) -> str:
-    """
-    Create JWT access token.
-
-    Args:
-        data: Payload data to encode
-        expires_delta: Token expiration time delta (default: 24 hours)
-
-    Returns:
-        str: Encoded JWT token
-    """
+    """Create JWT access token."""
     to_encode = data.copy()
 
     if expires_delta:

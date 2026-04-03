@@ -37,5 +37,8 @@ redis>=5.0.0
 celery[redis]>=5.3.0
 kombu>=5.3.0
 
+# Email (Resend)
+resend>=2.0.0
+
 # Production server
 gunicorn>=21.2.0
