@@ -216,7 +216,6 @@ class DailyAnalyticsInDB(DailyAnalytics):
         json_schema_extra = {
             "example": {
                 "id": "ana_123abc456",
-                "partition_key": "analytics",
                 "account_id": "acc_123abc456",
                 "date": "2024-01-15"
             }

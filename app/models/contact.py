@@ -152,7 +152,6 @@ class ContactInDB(Contact):
         json_schema_extra = {
             "example": {
                 "id": "con_123abc456",
-                "partition_key": "contact",
                 "account_id": "acc_123abc456"
             }
         }

@@ -157,9 +157,16 @@ class WebhookProcessor:
         try:
             container = cosmos_db.get_container_client(self.container_name)
 
+            # Extract account_id (partition key) from event envelope or recipient
+            account_id = (
+                event.get("ig_account_id")
+                or event.get("recipient", {}).get("id")
+                or "unknown"
+            )
+
             webhook_record = {
                 "id": event.get("id", f"webhook_{int(datetime.utcnow().timestamp())}"),
-                "partition_key": "webhook",
+                "account_id": account_id,
                 "event_type": event_type.value,
                 "payload": event,
                 "processed_at": datetime.utcnow().isoformat(),
@@ -182,9 +189,16 @@ class WebhookProcessor:
         try:
             container = cosmos_db.get_container_client(self.container_name)
 
+            # Extract account_id (partition key) from event envelope or recipient
+            account_id = (
+                event.get("ig_account_id")
+                or event.get("recipient", {}).get("id")
+                or "unknown"
+            )
+
             webhook_record = {
                 "id": f"webhook_failed_{int(datetime.utcnow().timestamp())}",
-                "partition_key": "webhook",
+                "account_id": account_id,
                 "event_type": "unknown",
                 "payload": event,
                 "error": error,

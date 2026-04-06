@@ -137,7 +137,6 @@ class ScheduledTaskInDB(ScheduledTask):
         json_schema_extra = {
             "example": {
                 "id": "tsk_123abc456",
-                "partition_key": "scheduled_task",
                 "account_id": "acc_123abc456"
             }
         }

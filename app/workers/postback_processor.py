@@ -319,7 +319,7 @@ class PostbackProcessor:
                 )
 
                 contact["messaging_window_expires"] = new_expiration.isoformat()
-                container.replace_item(contact["id"], contact)
+                container.replace_item(contact["id"], contact, partition_key=account_id)
                 logger.debug(f"Refreshed messaging window for {contact_id}")
 
         except Exception as e:
@@ -385,7 +385,7 @@ class PostbackProcessor:
                 contact = results[0]
                 contact["custom_fields"] = contact.get("custom_fields", {})
                 contact["custom_fields"]["is_follower"] = is_follower
-                container.replace_item(contact["id"], contact)
+                container.replace_item(contact["id"], contact, partition_key=account_id)
                 logger.debug(f"Updated follow status for {contact_id}: {is_follower}")
 
         except Exception as e:
@@ -590,7 +590,6 @@ class PostbackProcessor:
 
             analytics_entry = {
                 "id": f"click_{int(datetime.utcnow().timestamp())}_{postback_data['contact_id']}",
-                "partition_key": "analytics",
                 "account_id": account_id,
                 "contact_id": postback_data["contact_id"],
                 "automation_id": automation.get("id"),
@@ -629,7 +628,6 @@ class PostbackProcessor:
 
             log_entry = {
                 "id": f"msg_{int(datetime.utcnow().timestamp())}_{contact_id}",
-                "partition_key": "message_log",
                 "account_id": account_id,
                 "contact_id": contact_id,
                 "step_id": step_id,

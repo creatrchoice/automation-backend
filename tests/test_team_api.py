@@ -4,6 +4,13 @@ End-to-end test for the Team / Organization feature.
 Uses FastAPI TestClient (in-process) with mocked Cosmos DB and Redis
 so we can verify the full flow without external services.
 """
+import sys
+from pathlib import Path
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import os
 import json
 import uuid

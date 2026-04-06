@@ -258,7 +258,7 @@ class MessageProcessor:
             contact["messaging_window_expires"] = new_window_expires.isoformat()
             contact["last_message_received_at"] = datetime.utcnow().isoformat()
 
-            container.replace_item(contact["id"], contact)
+            container.replace_item(contact["id"], contact, partition_key=account_id)
             logger.debug(f"Refreshed messaging window for contact {contact_id}")
 
         except Exception as e:
@@ -498,7 +498,7 @@ class MessageProcessor:
                     f"Incoming message: {message_data.get('message_text', '')[:100]}"
                 )
 
-                container.replace_item(contact["id"], contact)
+                container.replace_item(contact["id"], contact, partition_key=account_id)
 
                 # Push WebSocket notification for manual reply
                 self._notify_human_handoff(account_id, contact_id, message_data)
@@ -551,7 +551,6 @@ class MessageProcessor:
 
             log_entry = {
                 "id": f"msg_{int(datetime.utcnow().timestamp())}_{contact_id}",
-                "partition_key": "message_log",
                 "account_id": account_id,
                 "contact_id": contact_id,
                 "step_id": step_id,

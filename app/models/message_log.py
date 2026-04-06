@@ -124,7 +124,6 @@ class MessageLogInDB(MessageLog):
         json_schema_extra = {
             "example": {
                 "id": "log_123abc456",
-                "partition_key": "message_log",
                 "account_id": "acc_123abc456"
             }
         }

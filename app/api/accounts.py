@@ -245,6 +245,7 @@ async def disconnect_account(
             await automations_container.replace_item(
                 item=automation["id"],
                 body=automation,
+                partition_key=automation.get("user_id"),
             )
 
         # Step 2: Unsubscribe from webhooks
@@ -266,6 +267,7 @@ async def disconnect_account(
         await accounts_container.replace_item(
             item=account_id,
             body=account,
+            partition_key=user_id,
         )
 
         # Step 4: Clear Redis cache

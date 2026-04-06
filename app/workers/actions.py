@@ -104,7 +104,7 @@ class ActionExecutor:
                 contact["tags"] = tags
                 contact["updated_at"] = datetime.utcnow().isoformat()
 
-                container.replace_item(contact["id"], contact)
+                container.replace_item(contact["id"], contact, partition_key=account_id)
                 logger.info(f"Added tag '{tag}' to contact {contact_ig_id}")
             else:
                 logger.debug(f"Contact {contact_ig_id} already has tag '{tag}'")
@@ -157,7 +157,7 @@ class ActionExecutor:
                 contact["tags"] = tags
                 contact["updated_at"] = datetime.utcnow().isoformat()
 
-                container.replace_item(contact["id"], contact)
+                container.replace_item(contact["id"], contact, partition_key=account_id)
                 logger.info(f"Removed tag '{tag}' from contact {contact_ig_id}")
             else:
                 logger.debug(f"Contact {contact_ig_id} doesn't have tag '{tag}'")
@@ -205,7 +205,7 @@ class ActionExecutor:
             contact["human_handoff_notes"] = action.get("notes", "Handed off to human agent")
             contact["updated_at"] = datetime.utcnow().isoformat()
 
-            container.replace_item(contact["id"], contact)
+            container.replace_item(contact["id"], contact, partition_key=account_id)
             logger.info(f"Enabled human handoff for contact {contact_ig_id}")
 
             # Push WebSocket notification
@@ -292,7 +292,6 @@ class ActionExecutor:
 
             scheduled_task = {
                 "id": f"sched_{int(datetime.utcnow().timestamp())}_{contact_ig_id}",
-                "partition_key": "scheduled_task",
                 "account_id": account_id,
                 "contact_id": contact_ig_id,
                 "message_template": message_template,
@@ -349,7 +348,7 @@ class ActionExecutor:
                 contact["custom_fields"]["is_follower"] = is_follower
                 contact["updated_at"] = datetime.utcnow().isoformat()
 
-                container.replace_item(contact["id"], contact)
+                container.replace_item(contact["id"], contact, partition_key=account_id)
                 logger.info(
                     f"Updated follow status for contact {contact_ig_id}: {is_follower}"
                 )

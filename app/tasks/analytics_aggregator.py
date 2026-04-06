@@ -212,7 +212,6 @@ class AnalyticsAggregator:
             date_str = date.strftime("%Y-%m-%d")
             analytics_record = {
                 "id": f"analytics_{account_id}_{date_str}",
-                "partition_key": "analytics_daily",
                 "account_id": account_id,
                 "date": date_str,
                 "metrics": metrics,
@@ -268,7 +267,7 @@ class AnalyticsAggregator:
             # Delete old logs
             for log in results:
                 try:
-                    container.delete_item(log["id"], partition_key="message_log")
+                    container.delete_item(log["id"], partition_key=log.get("account_id", "unknown"))
                     deleted_count += 1
                 except Exception as e:
                     logger.error(f"Error deleting log {log['id']}: {str(e)}")
