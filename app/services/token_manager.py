@@ -182,7 +182,11 @@ class TokenManager:
                 updated_account["updated_at"] = datetime.utcnow().isoformat()
 
                 logger.debug(f"Updating account {account_id} with new token")
-                container.replace_item(item=account_id, body=updated_account)
+                container.replace_item(
+                    item=account_id,
+                    body=updated_account,
+                    partition_key=updated_account.get("user_id"),
+                )
 
                 logger.info(f"Token refreshed successfully for account {account_id}")
                 return True

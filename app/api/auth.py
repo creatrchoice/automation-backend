@@ -54,6 +54,140 @@ async def _find_user_org_id(cosmos_client, user_id: str) -> Optional[str]:
     return None
 
 
+async def _subscribe_webhook_events(ig_user_id: str, access_token: str) -> bool:
+    """
+    Subscribe the connected Instagram account to webhook events.
+
+    Calls Meta's subscribed_apps endpoint so we receive real-time events
+    for messages, messaging_postbacks, and comments on this account.
+
+    This is a best-effort operation — if it fails, the account is still
+    connected and we log the error for manual retry.
+
+    Args:
+        ig_user_id: The Instagram user ID (numeric string)
+        access_token: Long-lived access token for the account
+    """
+    subscribed_fields = "messages,messaging_postbacks,comments"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps",
+                params={
+                    "subscribed_fields": subscribed_fields,
+                    "access_token": access_token,
+                },
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    logger.info(
+                        f"Webhook subscription successful for IG account {ig_user_id} "
+                        f"(fields: {subscribed_fields})"
+                    )
+                    return True
+                else:
+                    logger.warning(
+                        f"Webhook subscription returned non-success for {ig_user_id}: {result}"
+                    )
+                    return False
+            else:
+                logger.error(
+                    f"Webhook subscription failed for {ig_user_id}: "
+                    f"status={response.status_code}, body={response.text}"
+                )
+                return False
+
+    except Exception as e:
+        # Don't fail the entire OAuth flow if webhook subscription fails.
+        # The account is still connected — we can retry subscription later.
+        logger.error(
+            f"Webhook subscription error for {ig_user_id}: {e}",
+            exc_info=True,
+        )
+        return False
+
+
+@router.post("/instagram/{account_id}/subscribe-webhooks")
+async def subscribe_webhooks_for_account(
+    account_id: str,
+    current_user: dict = Depends(get_current_user),
+    cosmos_client=Depends(get_cosmos_client),
+):
+    """
+    Manually trigger webhook subscription for an existing connected Instagram account.
+
+    Usage:
+        curl -X POST https://automationapi.creatrchoice.info/auth/instagram/{account_id}/subscribe-webhooks \
+             -H "Authorization: Bearer <JWT_TOKEN>"
+    """
+    try:
+        # Fetch the account from DB
+        accounts_container = await cosmos_client.get_async_container_client(
+            INSTAGRAM_TOKEN_CONTAINER
+        )
+
+        # Partition key for dm_ig_accounts is /user_id
+        owner_user_id = current_user.get("sub")
+
+        try:
+            account = await accounts_container.read_item(
+                item=account_id,
+                partition_key=owner_user_id,
+            )
+        except Exception:
+            raise BadRequestError(
+                message=f"Account {account_id} not found for user {owner_user_id}",
+                user_title="Account Not Found",
+                user_message=f"Instagram account '{account_id}' was not found.",
+            )
+
+        ig_user_id = account.get("ig_user_id")
+        access_token = account.get("access_token")
+
+        if not ig_user_id or not access_token:
+            raise BadRequestError(
+                message="Missing ig_user_id or access_token",
+                user_title="Incomplete Account",
+                user_message="This account is missing required data for webhook subscription.",
+            )
+
+        # Subscribe to webhooks
+        success = await _subscribe_webhook_events(ig_user_id, access_token)
+
+        if success:
+            # Update DB
+            account["webhook_subscribed"] = True
+            account["webhook_fields"] = ["messages", "messaging_postbacks", "comments"]
+            await accounts_container.upsert_item(body=account)
+
+            return {
+                "status": "subscribed",
+                "account_id": account_id,
+                "ig_user_id": ig_user_id,
+                "username": account.get("username"),
+                "webhook_fields": ["messages", "messaging_postbacks", "comments"],
+            }
+        else:
+            raise ExternalServiceError(
+                service="Instagram",
+                message=f"Webhook subscription failed for {ig_user_id}",
+                user_message="Could not subscribe to Instagram webhook events. Check logs for details.",
+            )
+
+    except (BadRequestError, ExternalServiceError):
+        raise
+    except Exception as e:
+        logger.error(f"Webhook subscription endpoint error: {e}", exc_info=True)
+        raise InternalServerError(
+            message=f"Webhook subscription error: {e}",
+            user_title="Subscription Failed",
+            user_message="Failed to subscribe to webhook events. Please try again.",
+        )
+
+
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(
     email: str,
@@ -402,7 +536,19 @@ async def instagram_callback(
             )
             await accounts_container.upsert_item(body=account_doc)
 
-            # Step 6: Cache in Redis
+            # Step 6: Subscribe to webhook events (messages, messaging_postbacks, comments)
+            webhook_ok = await _subscribe_webhook_events(
+                ig_user_id=ig_user_id,
+                access_token=long_token,
+            )
+
+            # Update account doc with webhook subscription status
+            if webhook_ok:
+                account_doc["webhook_subscribed"] = True
+                account_doc["webhook_fields"] = ["messages", "messaging_postbacks", "comments"]
+                await accounts_container.upsert_item(body=account_doc)
+
+            # Step 7: Cache in Redis
             await redis_client.setex(
                 f"account:{account_id}",
                 86400 * 30,

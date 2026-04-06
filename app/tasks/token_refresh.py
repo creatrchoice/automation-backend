@@ -145,7 +145,7 @@ class TokenRefreshTask:
             account["token_expires_at"] = token_expiry_date.isoformat()
 
             container = cosmos_db.get_container_client(self.accounts_container)
-            container.replace_item(account["id"], account)
+            container.replace_item(account["id"], account, partition_key=account.get("user_id"))
 
             logger.info(f"Successfully refreshed token for account {account_id}")
             return True

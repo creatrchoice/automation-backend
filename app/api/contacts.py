@@ -440,6 +440,7 @@ async def update_contact_tags(
         await contacts_container.replace_item(
             item=contact_id,
             body=contact,
+            partition_key=account_id,
         )
 
         return contact

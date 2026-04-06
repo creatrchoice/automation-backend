@@ -144,7 +144,6 @@ class InstagramAccountInDB(InstagramAccount):
         json_schema_extra = {
             "example": {
                 "id": "acc_123abc456",
-                "partition_key": "instagram_account",
                 "user_id": "usr_123abc456",
                 "ig_account_id": "17841401234567890",
                 "ig_username": "mybusinessaccount"

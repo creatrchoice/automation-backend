@@ -471,7 +471,6 @@ class AutomationEngine:
 
             log_entry = {
                 "id": f"{message_id}",
-                "partition_key": "dm_message_log",
                 "account_id": account_id,
                 "automation_id": automation_id,
                 "step_id": step_id,
@@ -507,7 +506,6 @@ class AutomationEngine:
 
             task = {
                 "id": f"{automation_id}_{sender_id}_{int(time.time())}",
-                "partition_key": "dm_scheduled_task",
                 "account_id": account_id,
                 "automation_id": automation_id,
                 "sender_id": sender_id,

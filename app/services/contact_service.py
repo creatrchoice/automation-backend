@@ -81,7 +81,6 @@ class ContactService:
 
             contact = {
                 "id": contact_id,
-                "partition_key": "dm_contact",
                 "account_id": account_id,
                 "ig_user_id": ig_user_id,
                 "ig_username": ig_username,
@@ -162,7 +161,7 @@ class ContactService:
             contact["updated_at"] = now.isoformat()
 
             logger.debug(f"Updated interaction for contact {contact_id}: {interaction_type}")
-            container.replace_item(item=contact_id, body=contact)
+            container.replace_item(item=contact_id, body=contact, partition_key=account_id)
 
             # Invalidate cache
             self._invalidate_contact_cache(account_id, contact_id)
@@ -212,7 +211,7 @@ class ContactService:
                 contact["updated_at"] = datetime.utcnow().isoformat()
 
                 logger.debug(f"Added tag '{tag}' to contact {contact_id}")
-                container.replace_item(item=contact_id, body=contact)
+                container.replace_item(item=contact_id, body=contact, partition_key=account_id)
 
                 self._invalidate_contact_cache(account_id, contact_id)
 
@@ -261,7 +260,7 @@ class ContactService:
                 contact["updated_at"] = datetime.utcnow().isoformat()
 
                 logger.debug(f"Removed tag '{tag}' from contact {contact_id}")
-                container.replace_item(item=contact_id, body=contact)
+                container.replace_item(item=contact_id, body=contact, partition_key=account_id)
 
                 self._invalidate_contact_cache(account_id, contact_id)
 
@@ -318,7 +317,7 @@ class ContactService:
                 f"Refreshed messaging window for contact {contact_id}, "
                 f"expires at {expires_at}"
             )
-            container.replace_item(item=contact_id, body=contact)
+            container.replace_item(item=contact_id, body=contact, partition_key=account_id)
 
             self._invalidate_contact_cache(account_id, contact_id)
 
@@ -372,7 +371,7 @@ class ContactService:
             contact["updated_at"] = now.isoformat()
 
             logger.info(f"Set human handoff for contact {contact_id}: {reason}")
-            container.replace_item(item=contact_id, body=contact)
+            container.replace_item(item=contact_id, body=contact, partition_key=account_id)
 
             self._invalidate_contact_cache(account_id, contact_id)
 

@@ -386,7 +386,6 @@ class CommentProcessor:
 
             log_entry = {
                 "id": f"msg_{int(datetime.utcnow().timestamp())}_{contact_id}",
-                "partition_key": "message_log",
                 "account_id": account_id,
                 "contact_id": contact_id,
                 "step_id": step_id,

@@ -140,7 +140,6 @@ class WebhookEventInDB(WebhookEvent):
         json_schema_extra = {
             "example": {
                 "id": "evt_123abc456",
-                "partition_key": "webhook_event",
                 "account_id": "acc_123abc456"
             }
         }

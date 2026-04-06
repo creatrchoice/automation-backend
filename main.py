@@ -2,11 +2,13 @@
 Instagram DM Automation Platform - FastAPI Backend
 """
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import dm_settings
 from app.core.errors import AppError
@@ -14,6 +16,13 @@ from app.api.router import router as dm_router
 from app.db.cosmos_containers import initialize_containers
 
 logger = logging.getLogger(__name__)
+
+# Configure root logger for visibility
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
 @asynccontextmanager
@@ -87,7 +96,48 @@ async def unhandled_error_handler(request: Request, exc: Exception):
     )
 
 
-# CORS
+# ── Request Logging Middleware ────────────────────────────────────────────────
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log every incoming request and outgoing response with timing."""
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.time()
+        method = request.method
+        path = request.url.path
+        query = str(request.url.query) if request.url.query else ""
+        client_ip = request.client.host if request.client else "unknown"
+
+        # Log request
+        logger.info(
+            f"→ {method} {path}{'?' + query if query else ''} "
+            f"[client={client_ip}]"
+        )
+
+        # Process request
+        try:
+            response = await call_next(request)
+        except Exception as e:
+            duration_ms = round((time.time() - start) * 1000)
+            logger.error(
+                f"✗ {method} {path} — UNHANDLED EXCEPTION in {duration_ms}ms: {e}"
+            )
+            raise
+
+        duration_ms = round((time.time() - start) * 1000)
+
+        # Log response
+        status_code = response.status_code
+        level = logging.WARNING if status_code >= 400 else logging.INFO
+        logger.log(
+            level,
+            f"← {method} {path} — {status_code} in {duration_ms}ms"
+        )
+
+        return response
+
+
+# CORS (must be added before custom middleware so CORS headers are always set)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=dm_settings.cors_origins_list,
@@ -95,6 +145,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request logging
+app.add_middleware(RequestLoggingMiddleware)
+
 
 # Include DM Automation routes at /api/v1
 app.include_router(dm_router, prefix="/api/v1")

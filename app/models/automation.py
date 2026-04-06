@@ -347,7 +347,6 @@ class AutomationInDB(Automation):
         json_schema_extra = {
             "example": {
                 "id": "auto_123abc456",
-                "partition_key": "automation",
                 "user_id": "usr_123abc456"
             }
         }

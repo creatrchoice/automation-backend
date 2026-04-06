@@ -3,13 +3,17 @@ import logging
 import hmac
 import hashlib
 import json
+import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, status, Query, Request
+from fastapi import APIRouter, HTTPException, status, Query, Request, Depends
 from fastapi.responses import PlainTextResponse
 
 from app.core.config import dm_settings
 from app.core.errors import ForbiddenError, UnauthorizedError, BadRequestError
+from app.api.deps import get_cosmos_client
+from app.db.cosmos_containers import CONTAINER_WEBHOOK_EVENTS
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +64,42 @@ async def verify_instagram_webhook(
     return PlainTextResponse(content=hub_challenge, status_code=200)
 
 
+async def _save_raw_webhook(cosmos_client, payload: dict, raw_body: bytes) -> None:
+    """
+    Save the entire raw webhook payload to Cosmos DB for debugging and audit.
+
+    Stored in the webhook_events container with partition key = first entry's IG account ID.
+    This is fire-and-forget — errors are logged but never block the 200 response to Meta.
+    """
+    try:
+        # Extract the IG account ID from the first entry (used as partition key)
+        entries = payload.get("entry", [])
+        ig_account_id = entries[0].get("id", "unknown") if entries else "unknown"
+
+        doc = {
+            "id": str(uuid.uuid4()),
+            "account_id": ig_account_id,
+            "object": payload.get("object"),
+            "raw_payload": payload,
+            "raw_body": raw_body.decode("utf-8", errors="replace"),
+            "entry_count": len(entries),
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "processed": False,
+        }
+
+        container = await cosmos_client.get_async_container_client(CONTAINER_WEBHOOK_EVENTS)
+        await container.create_item(body=doc)
+        logger.info(f"Raw webhook saved: {doc['id']} for account {ig_account_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to save raw webhook to DB: {e}", exc_info=True)
+
+
 @router.post("/instagram")
-async def receive_instagram_webhook(request: Request):
+async def receive_instagram_webhook(
+    request: Request,
+    cosmos_client=Depends(get_cosmos_client),
+):
     """
     Receive and process Instagram webhook events.
 
@@ -148,12 +186,15 @@ async def receive_instagram_webhook(request: Request):
             logger.error(f"Invalid JSON payload: {e}")
             raise BadRequestError(message=f"Invalid JSON payload: {e}")
 
-        # Step 7: Validate it's an Instagram webhook
+        # Step 7: Save raw payload to DB (fire-and-forget, never blocks response)
+        await _save_raw_webhook(cosmos_client, payload, body)
+
+        # Step 8: Validate it's an Instagram webhook
         if payload.get("object") != "instagram":
             logger.warning(f"Non-Instagram webhook object: {payload.get('object')}")
             raise BadRequestError(message=f"Invalid webhook object: {payload.get('object')}")
 
-        # Step 8: Enqueue for async processing
+        # Step 9: Enqueue for async processing
         # IMPORTANT: Return 200 immediately. Meta expects response within 20 seconds.
         # If we don't respond in time, Meta will retry and may disable the webhook.
         await _enqueue_webhook_events(payload)

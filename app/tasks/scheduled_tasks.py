@@ -315,7 +315,7 @@ class ScheduledTaskExecutor:
             elif status == "completed":
                 task["completed_at"] = datetime.utcnow().isoformat()
 
-            container.replace_item(task["id"], task)
+            container.replace_item(task["id"], task, partition_key=task.get("account_id"))
             logger.debug(f"Updated task {task['id']} status to {status}")
 
         except Exception as e:
@@ -344,7 +344,6 @@ class ScheduledTaskExecutor:
 
             log_entry = {
                 "id": f"msg_{int(datetime.utcnow().timestamp())}_{contact_id}",
-                "partition_key": "message_log",
                 "account_id": account_id,
                 "contact_id": contact_id,
                 "task_id": task_id,
