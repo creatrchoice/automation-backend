@@ -84,20 +84,49 @@ class MessageProcessor:
 
     def _extract_message_data(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Extract message data from webhook payload.
+        Extract message data from webhook event envelope.
+
+        The event envelope from _enqueue_webhook_events has this shape:
+            {
+                "ig_account_id": "...",        # Our IG account that received the message
+                "webhook_timestamp": ...,
+                "event": {
+                    "sender": {"id": "<SENDER_IG_ID>"},
+                    "recipient": {"id": "<RECIPIENT_IG_ID>"},
+                    "timestamp": <UNIX_MS>,
+                    "message": {
+                        "mid": "<MESSAGE_ID>",
+                        "text": "Hello"
+                    }
+                },
+                "event_source": "messaging"
+            }
 
         Args:
-            event: Webhook event payload
+            event: Webhook event envelope
 
         Returns:
             Extracted message data or None
         """
         try:
-            message = event.get("message", {})
-            from_id = event.get("from", {}).get("id")
+            # Extract the actual messaging event from the envelope
+            inner_event = event.get("event", {})
+
+            # If the event was passed directly (not wrapped), fall back to event itself
+            if not inner_event or ("sender" not in inner_event and "message" not in inner_event):
+                inner_event = event
+
+            message = inner_event.get("message", {})
+
+            # Instagram DMs use "sender"/"recipient", not "from"
+            from_id = inner_event.get("sender", {}).get("id")
+            recipient_id = inner_event.get("recipient", {}).get("id")
+
+            # ig_account_id is from envelope (our account), fallback to recipient
+            ig_account_id = event.get("ig_account_id") or recipient_id
 
             if not from_id:
-                logger.warning("Missing 'from' ID in webhook event")
+                logger.warning("Missing sender ID in webhook event")
                 return None
 
             # Detect message source type
@@ -113,12 +142,13 @@ class MessageProcessor:
             return {
                 "message_id": message.get("mid"),
                 "from_id": from_id,
-                "ig_user_id": from_id,
+                "recipient_id": recipient_id,
+                "ig_user_id": ig_account_id,  # Our IG account (for resolving automations)
                 "message_text": message_text,
                 "message_type": message_type.value,
                 "media": message.get("attachments", {}).get("media"),
                 "story_id": self._extract_story_id(message) if message_type == MessageSourceType.STORY_REPLY else None,
-                "timestamp": event.get("timestamp", datetime.utcnow().isoformat()),
+                "timestamp": inner_event.get("timestamp", datetime.utcnow().isoformat()),
             }
 
         except Exception as e:

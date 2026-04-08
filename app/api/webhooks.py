@@ -219,6 +219,14 @@ async def _enqueue_webhook_events(payload: dict):
     1. Sends to Azure Service Bus (production) for worker processing
     2. Processes inline via Celery task (fallback)
 
+    Instagram sends different payload structures depending on the event type:
+
+    DMs/Postbacks:
+        entry[].messaging[] — array of messaging events with sender/recipient
+
+    Comments/Mentions (changes array):
+        entry[].changes[] = [{ "field": "comments", "value": { comment data } }]
+
     Args:
         payload: Full webhook payload from Meta
     """
@@ -240,7 +248,7 @@ async def _enqueue_webhook_events(payload: dict):
                 }
                 await _dispatch_event(event_envelope)
 
-            # Handle changes events (comments, feed updates)
+            # Handle changes events (comments, mentions, feed updates)
             changes = entry.get("changes", [])
             for change in changes:
                 event_envelope = {

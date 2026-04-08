@@ -119,30 +119,55 @@ class PostbackProcessor:
 
     def _extract_postback_data(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Extract postback data from webhook payload.
+        Extract postback data from webhook event envelope.
+
+        The event envelope from _enqueue_webhook_events has this shape:
+            {
+                "ig_account_id": "...",
+                "webhook_timestamp": ...,
+                "event": {
+                    "sender": {"id": "<SENDER_IG_ID>"},
+                    "recipient": {"id": "<RECIPIENT_IG_ID>"},
+                    "timestamp": <UNIX_MS>,
+                    "postback": {
+                        "payload": "<PAYLOAD>",
+                        "title": "<BUTTON_TITLE>"
+                    }
+                },
+                "event_source": "messaging"
+            }
 
         Args:
-            event: Webhook event payload
+            event: Webhook event envelope
 
         Returns:
             Extracted postback data or None
         """
         try:
-            postback = event.get("postback", {})
-            from_id = event.get("from", {}).get("id")
-            messaging_type = event.get("messaging_type")
+            # Extract the actual messaging event from the envelope
+            inner_event = event.get("event", {})
+
+            # If the event was passed directly (not wrapped), fall back to event itself
+            if not inner_event or "postback" not in inner_event:
+                inner_event = event
+
+            postback = inner_event.get("postback", {})
+
+            # Instagram uses "sender"/"recipient", not "from"
+            from_id = inner_event.get("sender", {}).get("id")
+            recipient_id = inner_event.get("recipient", {}).get("id")
+            ig_account_id = event.get("ig_account_id") or recipient_id
 
             if not from_id:
-                logger.warning("Missing 'from' ID in postback event")
+                logger.warning("Missing sender ID in postback event")
                 return None
 
             return {
                 "contact_id": from_id,
-                "ig_user_id": from_id,
+                "ig_user_id": ig_account_id,  # Our IG account
                 "payload": postback.get("payload", ""),
                 "title": postback.get("title", ""),
-                "messaging_type": messaging_type,
-                "timestamp": event.get("timestamp", datetime.utcnow().isoformat()),
+                "timestamp": inner_event.get("timestamp", datetime.utcnow().isoformat()),
             }
 
         except Exception as e:
