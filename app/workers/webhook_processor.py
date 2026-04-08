@@ -97,31 +97,63 @@ class WebhookProcessor:
         """
         Determine the type of webhook event based on payload structure.
 
+        The event_envelope has this shape:
+            {
+                "ig_account_id": "...",
+                "webhook_timestamp": ...,
+                "event": { ... },          # The actual event payload
+                "event_source": "messaging" | "changes",
+                "field": "comments" | ...  # Only present for changes events
+            }
+
+        For messaging events, event["event"] contains sender/recipient/message.
+        For changes events, event["event"] contains {"field": "comments", "value": {...}}.
+
         Args:
-            event: Webhook event payload
+            event: Webhook event envelope
 
         Returns:
             WebhookEventType enum value
         """
-        # Check for comment events
-        if "comments" in event or "text" in event and "message" not in event:
-            return WebhookEventType.COMMENT
+        event_source = event.get("event_source")
+        inner_event = event.get("event", {})
 
-        # Check for message events
+        # --- Changes-based events (comments, mentions, feed) ---
+        if event_source == "changes":
+            field = event.get("field") or inner_event.get("field", "")
+            if field == "comments":
+                return WebhookEventType.COMMENT
+            if field in ("feed", "story_insights"):
+                return WebhookEventType.FEED
+            # Fallback: unknown changes field
+            logger.warning(f"Unknown changes field: {field}")
+            return WebhookEventType.UNKNOWN
+
+        # --- Messaging-based events (DMs, postbacks, story replies) ---
+        if event_source == "messaging":
+            # Check for postback events
+            if "postback" in inner_event:
+                return WebhookEventType.POSTBACK
+
+            # Check for message events
+            if "message" in inner_event:
+                message = inner_event.get("message", {})
+                # Check if it's a story reply
+                if message.get("reply_to", {}).get("story"):
+                    return WebhookEventType.STORY
+                return WebhookEventType.MESSAGE
+
+            # Read receipts, delivery confirmations, etc.
+            if "read" in inner_event or "delivery" in inner_event:
+                return WebhookEventType.MESSAGE
+
+            return WebhookEventType.UNKNOWN
+
+        # --- Fallback for legacy/direct calls ---
         if "message" in event:
-            message = event.get("message", {})
-            # Check if it's a story reply
-            if message.get("reply_to", {}).get("story"):
-                return WebhookEventType.STORY
             return WebhookEventType.MESSAGE
-
-        # Check for postback events
         if "postback" in event:
             return WebhookEventType.POSTBACK
-
-        # Check for feed/image events
-        if "feed" in event or "media" in event:
-            return WebhookEventType.FEED
 
         return WebhookEventType.UNKNOWN
 

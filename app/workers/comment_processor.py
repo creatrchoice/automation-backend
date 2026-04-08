@@ -72,20 +72,49 @@ class CommentProcessor:
 
     def _extract_comment_data(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Extract comment data from webhook payload.
+        Extract comment data from webhook event envelope.
+
+        The event envelope from _enqueue_webhook_events has this shape:
+            {
+                "ig_account_id": "...",
+                "webhook_timestamp": ...,
+                "event": {
+                    "field": "comments",
+                    "value": {
+                        "id": "<COMMENT_ID>",
+                        "text": "<COMMENT_TEXT>",
+                        "from": {"id": "<USER_ID>", "username": "<USERNAME>"},
+                        "media": {"id": "<MEDIA_ID>", "media_product_type": "..."}
+                    }
+                },
+                "event_source": "changes",
+                "field": "comments"
+            }
 
         Args:
-            event: Webhook event payload
+            event: Webhook event envelope
 
         Returns:
             Extracted comment data or None
         """
         try:
-            comment_text = event.get("text", "")
-            from_id = event.get("from", {}).get("id")
-            media_id = event.get("media", {}).get("id")
+            # Extract the actual comment value from the envelope
+            inner_event = event.get("event", {})
+            comment_value = inner_event.get("value", {})
 
-            if not all([comment_text, from_id, media_id]):
+            # If the event was passed directly (not wrapped), fall back to event itself
+            if not comment_value and "text" in event:
+                comment_value = event
+
+            comment_text = comment_value.get("text", "")
+            from_data = comment_value.get("from", {})
+            from_id = from_data.get("id")
+            from_username = from_data.get("username")
+            media_data = comment_value.get("media", {})
+            media_id = media_data.get("id")
+            ig_account_id = event.get("ig_account_id", "")
+
+            if not all([comment_text, from_id]):
                 logger.warning(
                     "Missing required comment fields: "
                     f"text={bool(comment_text)}, from_id={from_id}, media_id={media_id}"
@@ -93,12 +122,14 @@ class CommentProcessor:
                 return None
 
             return {
-                "comment_id": event.get("id"),
+                "comment_id": comment_value.get("id"),
                 "comment_text": comment_text,
                 "from_id": from_id,
-                "ig_user_id": from_id,  # Instagram user ID
+                "from_username": from_username,
+                "ig_user_id": ig_account_id,  # The IG account that owns the post
                 "media_id": media_id,
-                "timestamp": event.get("timestamp", datetime.utcnow().isoformat()),
+                "media_product_type": media_data.get("media_product_type"),
+                "timestamp": event.get("webhook_timestamp", datetime.utcnow().isoformat()),
             }
 
         except Exception as e:
