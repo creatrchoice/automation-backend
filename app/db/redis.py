@@ -7,6 +7,35 @@ from app.core.config import dm_settings
 logger = logging.getLogger(__name__)
 
 
+def redis_should_use_tls() -> bool:
+    """
+    Use TLS (rediss) when REDIS_SSL is set, or for known managed-Redis hostnames.
+
+    Redis Cloud / Redis Enterprise Cloud public endpoints require TLS; using plain
+    redis:// against a TLS port causes: [SSL] record layer failure.
+    """
+    if dm_settings.REDIS_SSL:
+        return True
+    h = (dm_settings.REDIS_HOST or "").lower()
+    return any(
+        x in h
+        for x in (
+            "redislabs.com",
+            "redis.cloud",
+            "redis-cloud.com",
+            "redisenterprise.com",
+        )
+    )
+
+
+def build_redis_ssl_context():
+    """SSL context for Redis Cloud (managed certs; disable verify for simplicity)."""
+    ctx = ssl_module.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl_module.CERT_NONE
+    return ctx
+
+
 def _build_redis_kwargs() -> dict:
     """Build Redis connection kwargs from settings."""
     kwargs = {
@@ -21,9 +50,8 @@ def _build_redis_kwargs() -> dict:
     if dm_settings.REDIS_PASSWORD:
         kwargs["password"] = dm_settings.REDIS_PASSWORD
 
-    if dm_settings.REDIS_SSL:
-        kwargs["ssl"] = True
-        kwargs["ssl_cert_reqs"] = ssl_module.CERT_NONE
+    if redis_should_use_tls():
+        kwargs["ssl"] = build_redis_ssl_context()
 
     return kwargs
 

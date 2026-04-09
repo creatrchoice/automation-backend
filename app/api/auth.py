@@ -10,7 +10,10 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, status, Depends, Query
 from fastapi.responses import RedirectResponse
 import httpx
+import ssl
 from urllib.parse import urlencode
+
+from redis.exceptions import RedisError
 
 from app.core.config import dm_settings
 from app.core.errors import (
@@ -20,6 +23,7 @@ from app.core.errors import (
     BadRequestError,
     InternalServerError,
     ExternalServiceError,
+    RedisUnavailableError,
 )
 from app.api.deps import (
     get_redis_client,
@@ -428,8 +432,24 @@ async def get_instagram_state(
             "authorization_url": auth_url,
         }
 
+    except (RedisError, ssl.SSLError) as e:
+        # Redis Cloud requires TLS (rediss); plain redis:// causes SSL record layer failure.
+        logger.error(
+            "OAuth state failed: Redis/SSL error (use rediss / REDIS_SSL for Redis Cloud; "
+            "verify REDIS_HOST, REDIS_PORT, REDIS_PASSWORD): %s",
+            e,
+            exc_info=True,
+        )
+        raise RedisUnavailableError(
+            message=f"Redis error during OAuth state: {e}",
+            user_title="Connection Unavailable",
+            user_message=(
+                "Could not reserve a secure session for Instagram login. "
+                "If this continues, the app session store may be unavailable."
+            ),
+        )
     except Exception as e:
-        logger.error(f"OAuth state generation error: {e}")
+        logger.error(f"OAuth state generation error: {e}", exc_info=True)
         raise InternalServerError(
             message=f"OAuth state generation failed: {e}",
             user_title="Connection Error",

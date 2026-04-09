@@ -165,3 +165,14 @@ class DatabaseError(AppError):
     code = "DATABASE_ERROR"
     default_user_title = "Service Unavailable"
     default_user_message = "We're experiencing a temporary issue. Please try again in a moment."
+
+
+class RedisUnavailableError(AppError):
+    """Redis down or unreachable (OAuth state, caching, workers)."""
+
+    status_code = 503
+    code = "REDIS_UNAVAILABLE"
+    default_user_title = "Service Unavailable"
+    default_user_message = (
+        "Session storage is temporarily unavailable. Please try again in a moment."
+    )
