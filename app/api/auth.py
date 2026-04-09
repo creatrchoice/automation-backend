@@ -516,6 +516,7 @@ async def instagram_callback(
             account_id = f"instagram_{ig_user_id}"
             account_doc = {
                 "id": account_id,
+                "account_id": account_id,
                 "user_id": owner_user_id,
                 "type": "instagram_account",
                 "ig_user_id": ig_user_id,

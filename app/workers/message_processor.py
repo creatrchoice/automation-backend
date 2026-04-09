@@ -219,17 +219,22 @@ class MessageProcessor:
             cached_account_id = redis_client.get(cache_key)
             if cached_account_id:
                 logger.debug(f"Found account mapping in cache for {ig_user_id}")
-                return cached_account_id
+                return (
+                    cached_account_id.decode()
+                    if isinstance(cached_account_id, bytes)
+                    else str(cached_account_id)
+                )
 
-            # Query Cosmos DB
+            # Query Cosmos DB (documents use c.id; account_id may mirror id)
             container = cosmos_db.get_container_client(
                 dm_settings.DM_IG_ACCOUNTS_CONTAINER
             )
-            query = "SELECT c.account_id FROM c WHERE c.ig_user_id = @ig_user_id LIMIT 1"
+            query = "SELECT c.id, c.account_id FROM c WHERE c.ig_user_id = @ig_user_id"
             results = list(
                 container.query_items(
                     query=query,
                     parameters=[{"name": "@ig_user_id", "value": ig_user_id}],
+                    enable_cross_partition_query=True,
                 )
             )
 
@@ -237,7 +242,8 @@ class MessageProcessor:
                 logger.warning(f"No account found for Instagram user {ig_user_id}")
                 return None
 
-            account_id = results[0].get("account_id")
+            row = results[0]
+            account_id = row.get("account_id") or row.get("id")
 
             # Cache the mapping
             cache_ttl = dm_settings.ACCOUNT_MAP_CACHE_TTL_HOURS * 3600
@@ -248,6 +254,47 @@ class MessageProcessor:
         except Exception as e:
             logger.error(f"Error resolving account ID: {str(e)}")
             return None
+
+    def _effective_automation_type(self, automation: Dict[str, Any]) -> str:
+        """Derive worker automation type from automation_type or trigger (API shape)."""
+        explicit = automation.get("automation_type")
+        if explicit:
+            return str(explicit).lower().replace("-", "_")
+        trigger = automation.get("trigger") or {}
+        tt = trigger.get("type") or "message_received"
+        if isinstance(tt, str):
+            tt = tt.lower().replace("-", "_")
+        else:
+            tt = "message_received"
+        if tt in ("keyword", "dm_keyword"):
+            return "dm_keyword"
+        if tt in ("story_reaction", "story_reply", "story"):
+            return "story_reaction"
+        if tt == "message_received" and (trigger.get("keywords") or []):
+            return "dm_keyword"
+        return tt
+
+    def _keywords_for_automation(self, automation: Dict[str, Any]) -> List[str]:
+        raw = automation.get("keywords")
+        if raw is None:
+            raw = (automation.get("trigger") or {}).get("keywords", [])
+        out: List[str] = []
+        for k in raw or []:
+            if isinstance(k, dict):
+                v = k.get("value") or k.get("text") or ""
+                if v:
+                    out.append(str(v))
+            elif k is not None and str(k).strip():
+                out.append(str(k).strip())
+        return out
+
+    def _trigger_story_ids(self, automation: Dict[str, Any]) -> List[str]:
+        ids = automation.get("trigger_stories")
+        if ids is None:
+            ids = (automation.get("trigger") or {}).get("trigger_stories", [])
+        if not ids:
+            return []
+        return [str(s) for s in ids if s is not None]
 
     def _refresh_messaging_window(self, account_id: str, contact_id: str) -> None:
         """
@@ -310,39 +357,44 @@ class MessageProcessor:
         """
         try:
             container = cosmos_db.get_container_client(self.automations_container)
-            matching = []
+            matching: List[Dict[str, Any]] = []
+            seen_ids = set()
 
-            # Determine automation types to search
-            search_types = []
             if message_type == "text":
-                search_types = ["dm_keyword", "message_received"]
+                search_types = {"dm_keyword", "message_received"}
             elif message_type == "story_reply":
-                search_types = ["story_reaction", "message_received"]
+                search_types = {"story_reaction", "message_received"}
             elif message_type == "media_share":
-                search_types = ["message_received"]
+                search_types = {"message_received"}
+            else:
+                search_types = {"message_received"}
 
-            for automation_type in search_types:
-                query = (
-                    "SELECT c.* FROM c "
-                    "WHERE c.account_id = @account_id "
-                    "AND c.status = 'active' "
-                    "AND c.automation_type = @type"
+            query = (
+                "SELECT * FROM c WHERE c.account_id = @account_id AND c.status = 'active'"
+            )
+            results = list(
+                container.query_items(
+                    query=query,
+                    parameters=[{"name": "@account_id", "value": account_id}],
+                    enable_cross_partition_query=True,
                 )
+            )
 
-                results = list(
-                    container.query_items(
-                        query=query,
-                        parameters=[
-                            {"name": "@account_id", "value": account_id},
-                            {"name": "@type", "value": automation_type},
-                        ],
-                    )
-                )
-
-                # Filter based on conditions
-                for automation in results:
-                    if self._matches_automation_conditions(automation, context):
-                        matching.append(automation)
+            for automation in results:
+                if automation.get("enabled") is False:
+                    continue
+                if automation.get("deleted_at"):
+                    continue
+                eff = self._effective_automation_type(automation)
+                if eff not in search_types:
+                    continue
+                aid = automation.get("id")
+                if aid in seen_ids:
+                    continue
+                if self._matches_automation_conditions(automation, context):
+                    matching.append(automation)
+                    if aid:
+                        seen_ids.add(aid)
 
             return matching
 
@@ -364,28 +416,26 @@ class MessageProcessor:
             True if conditions match
         """
         try:
-            # For keyword-based automations, check keywords
-            if automation.get("automation_type") == "dm_keyword":
-                keywords = automation.get("keywords", [])
-                message_text = context.get("message_text", "").lower()
+            eff = self._effective_automation_type(automation)
 
+            if eff == "dm_keyword":
+                keywords = self._keywords_for_automation(automation)
+                message_text = context.get("message_text", "").lower()
+                if not keywords:
+                    return False
                 for keyword in keywords:
                     if keyword.lower() in message_text:
                         return True
-
                 return False
 
-            # For story-based automations
-            if automation.get("automation_type") == "story_reaction":
+            if eff == "story_reaction":
                 story_id = context.get("story_id")
-                trigger_stories = automation.get("trigger_stories", [])
+                trigger_stories = self._trigger_story_ids(automation)
+                if not trigger_stories:
+                    return False
+                return story_id in trigger_stories
 
-                if story_id in trigger_stories:
-                    return True
-
-                return False
-
-            # Default match
+            # message_received and others: match inbound
             return True
 
         except Exception as e:
@@ -464,12 +514,13 @@ class MessageProcessor:
 
             logger.info(f"Executing step {step.get('id')}")
 
-            # Build and send message
-            message_template = step.get("message_template", {})
-            message = message_builder.build_message(message_template, context)
+            # Build and send message (step may store message_text / message_template / message on the step)
+            message = message_builder.build_message(
+                step, context, automation_id=automation.get("id")
+            )
 
             if message:
-                instagram_api.send_dm(account_id, contact_id, message)
+                instagram_api.send_dm_sync(account_id, contact_id, message)
                 self._log_message_delivery(
                     account_id, contact_id, step.get("id"), message, "sent"
                 )

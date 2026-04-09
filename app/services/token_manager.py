@@ -1,6 +1,6 @@
 """Token management service: encryption, decryption, and refresh."""
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 from app.core.security import TokenEncryption, SecurityError
 from app.core.config import dm_settings
 from app.db.cosmos_db import CosmosDBClient
@@ -61,6 +61,59 @@ class TokenManager:
             logger.error(f"Token decryption failed: {str(e)}")
             raise
 
+    def get_account_document(self, account_id: str) -> Dict[str, Any]:
+        """
+        Load full account document from Cosmos (by c.id).
+
+        Args:
+            account_id: Internal account id (e.g. instagram_{ig_user_id})
+
+        Returns:
+            Account document dict
+
+        Raises:
+            ValueError: If account not found
+        """
+        logger.debug(f"Loading account {account_id} from Cosmos DB")
+        container = self.cosmos_client.get_container_client(
+            dm_settings.DM_IG_ACCOUNTS_CONTAINER
+        )
+        query = "SELECT * FROM c WHERE c.id = @account_id"
+        items = list(
+            container.query_items(
+                query=query,
+                parameters=[{"name": "@account_id", "value": account_id}],
+            )
+        )
+        if not items:
+            logger.error(f"Account {account_id} not found in Cosmos DB")
+            raise ValueError(f"Account {account_id} not found")
+        return items[0]
+
+    @staticmethod
+    def graph_user_id_from_document(account: Dict[str, Any], account_id: str) -> str:
+        """Resolve IG user id for Graph URL paths from a loaded account document."""
+        ig = account.get("ig_user_id")
+        if ig is not None and str(ig).strip() != "":
+            return str(ig)
+        if account_id.startswith("instagram_"):
+            return account_id[len("instagram_") :]
+        return account_id
+
+    def get_graph_api_user_id(self, account_id: str) -> str:
+        """
+        Instagram Graph paths use the numeric IG user id (e.g. /{ig-user-id}/messages),
+        not the internal document id prefix.
+
+        Args:
+            account_id: Internal id (instagram_...) or raw ig_user_id
+
+        Returns:
+            String IG user id for URL path segments
+        """
+        account = self.get_account_document(account_id)
+        return self.graph_user_id_from_document(account, account_id)
+
     def get_decrypted_account_token(self, account_id: str) -> str:
         """
         Load account from Cosmos DB and decrypt its access token.
@@ -76,30 +129,13 @@ class TokenManager:
             SecurityError: If decryption fails
         """
         try:
-            logger.debug(f"Loading account {account_id} from Cosmos DB")
-            container = self.cosmos_client.get_container_client(
-                dm_settings.DM_IG_ACCOUNTS_CONTAINER
-            )
-
-            # Query for account by ID
-            query = "SELECT * FROM c WHERE c.id = @account_id"
-            items = list(container.query_items(
-                query=query,
-                parameters=[{"name": "@account_id", "value": account_id}]
-            ))
-
-            if not items:
-                logger.error(f"Account {account_id} not found in Cosmos DB")
-                raise ValueError(f"Account {account_id} not found")
-
-            account = items[0]
+            account = self.get_account_document(account_id)
             encrypted_token = account.get("access_token")
 
             if not encrypted_token:
                 logger.error(f"No access token found for account {account_id}")
                 raise ValueError(f"No access token for account {account_id}")
 
-            # Decrypt and return
             return self.decrypt_token(encrypted_token)
 
         except Exception as e:
@@ -122,22 +158,15 @@ class TokenManager:
         try:
             logger.info(f"Refreshing access token for account {account_id}")
 
-            # Load current account
-            container = self.cosmos_client.get_container_client(
-                dm_settings.DM_IG_ACCOUNTS_CONTAINER
-            )
-
-            query = "SELECT * FROM c WHERE c.id = @account_id"
-            items = list(container.query_items(
-                query=query,
-                parameters=[{"name": "@account_id", "value": account_id}]
-            ))
-
-            if not items:
+            try:
+                account = self.get_account_document(account_id)
+            except ValueError:
                 logger.error(f"Account {account_id} not found")
                 return False
 
-            account = items[0]
+            container = self.cosmos_client.get_container_client(
+                dm_settings.DM_IG_ACCOUNTS_CONTAINER
+            )
             current_token = self.decrypt_token(account["access_token"])
 
             # Call Instagram refresh endpoint

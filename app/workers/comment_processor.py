@@ -338,11 +338,13 @@ class CommentProcessor:
                 "comment_id": comment_data.get("comment_id"),
                 "comment_text": comment_data.get("comment_text"),
                 "from_id": comment_data.get("from_id"),
+                "from_username": comment_data.get("from_username"),
+                "media_id": comment_data.get("media_id"),
                 "account_id": account_id,
                 "timestamp": datetime.utcnow().isoformat(),
             }
 
-            # Execute the step
+            # Execute the step — pass comment_id so DM is sent as reply to the comment
             self._execute_step(
                 first_step,
                 automation,
@@ -383,13 +385,18 @@ class CommentProcessor:
             from app.services.message_builder import message_builder
             from app.services.instagram_api import instagram_api
 
-            # Build message
-            message_template = step.get("message_template", {})
-            message = message_builder.build_message(message_template, context)
+            # Build message (step may store message_text / message_template / message on the step)
+            message = message_builder.build_message(
+                step, context, automation_id=automation.get("id")
+            )
 
-            # Send message
+            # Send message — for comment triggers, use comment_id as recipient
+            # Instagram API requires: recipient: { comment_id: "..." } for comment-to-DM
             if message:
-                instagram_api.send_dm(account_id, contact_id, message)
+                comment_id = context.get("comment_id") if context.get("trigger_type") == "comment" else None
+                instagram_api.send_dm_sync(
+                    account_id, contact_id, message, comment_id=comment_id
+                )
 
                 # Log message delivery
                 self._log_message_delivery(

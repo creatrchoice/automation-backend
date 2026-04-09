@@ -109,6 +109,16 @@ async def create_automation(
             "updated_at": None,
         }
 
+        tr = trigger or {}
+        tt_raw = tr.get("type") or "message_received"
+        tt = tt_raw.lower().replace("-", "_") if isinstance(tt_raw, str) else "message_received"
+        if tt in ("keyword",):
+            tt = "dm_keyword"
+        if tt == "message_received" and (tr.get("keywords") or []):
+            automation_doc["automation_type"] = "dm_keyword"
+        else:
+            automation_doc["automation_type"] = tt
+
         # Store in Cosmos DB
         automations_container = await cosmos_client.get_async_container_client(
             AUTOMATIONS_CONTAINER
@@ -367,6 +377,15 @@ async def update_automation(
             automation["name"] = name
         if trigger is not None:
             automation["trigger"] = trigger
+            tr = trigger or {}
+            tt_raw = tr.get("type") or "message_received"
+            tt = tt_raw.lower().replace("-", "_") if isinstance(tt_raw, str) else "message_received"
+            if tt in ("keyword",):
+                tt = "dm_keyword"
+            if tt == "message_received" and (tr.get("keywords") or []):
+                automation["automation_type"] = "dm_keyword"
+            else:
+                automation["automation_type"] = tt
         if conditions is not None:
             automation["conditions"] = conditions
         if steps is not None:
