@@ -1,4 +1,5 @@
 """Webhook routes for receiving Instagram messages and events."""
+import asyncio
 import logging
 import hmac
 import hashlib
@@ -64,25 +65,46 @@ async def verify_instagram_webhook(
     return PlainTextResponse(content=hub_challenge, status_code=200)
 
 
-async def _save_raw_webhook(cosmos_client, payload: dict, raw_body: bytes) -> None:
+async def _save_raw_webhook(cosmos_client, raw_body: bytes) -> None:
     """
-    Save the entire raw webhook payload to Cosmos DB for debugging and audit.
+    Save the raw webhook body to Cosmos DB IMMEDIATELY — before any JSON parsing.
 
-    Stored in the webhook_events container with partition key = first entry's IG account ID.
-    This is fire-and-forget — errors are logged but never block the 200 response to Meta.
+    This ensures we capture the exact bytes Meta sent even if:
+    - JSON parsing fails (malformed payload)
+    - Payload has unexpected structure
+    - Any downstream processing errors
+
+    Stored in the webhook_events container with partition key = account_id.
+    Fire-and-forget — errors are logged but never block the 200 response to Meta.
     """
     try:
-        # Extract the IG account ID from the first entry (used as partition key)
-        entries = payload.get("entry", [])
-        ig_account_id = entries[0].get("id", "unknown") if entries else "unknown"
+        raw_str = raw_body.decode("utf-8", errors="replace")
+
+        # Try to parse JSON for structured fields, but don't fail if it's malformed
+        parsed = None
+        ig_account_id = "unknown"
+        object_type = "unknown"
+        entry_count = 0
+        parse_error = None
+
+        try:
+            parsed = json.loads(raw_str)
+            entries = parsed.get("entry", [])
+            ig_account_id = entries[0].get("id", "unknown") if entries else "unknown"
+            object_type = parsed.get("object", "unknown")
+            entry_count = len(entries)
+        except (json.JSONDecodeError, AttributeError, IndexError, TypeError) as e:
+            parse_error = str(e)
+            logger.warning(f"Raw webhook body is not valid JSON: {e}")
 
         doc = {
             "id": str(uuid.uuid4()),
             "account_id": ig_account_id,
-            "object": payload.get("object"),
-            "raw_payload": payload,
-            "raw_body": raw_body.decode("utf-8", errors="replace"),
-            "entry_count": len(entries),
+            "object": object_type,
+            "raw_body": raw_str,                     # Always saved — exact bytes from Meta
+            "raw_payload": parsed,                    # None if JSON parse failed
+            "parse_error": parse_error,               # Set if body wasn't valid JSON
+            "entry_count": entry_count,
             "received_at": datetime.now(timezone.utc).isoformat(),
             "processed": False,
         }
@@ -179,15 +201,17 @@ async def receive_instagram_webhook(
             logger.warning("Webhook signature mismatch - possible tampering")
             raise UnauthorizedError(message="Webhook signature mismatch")
 
-        # Step 6: Parse JSON payload
+        # Step 6: Save raw body to DB IMMEDIATELY (before JSON parsing)
+        # This ensures we capture the exact bytes Meta sent even if parsing fails.
+        # Fire-and-forget via create_task — doesn't delay the response.
+        asyncio.create_task(_save_raw_webhook(cosmos_client, body))
+
+        # Step 7: Parse JSON payload
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON payload: {e}")
             raise BadRequestError(message=f"Invalid JSON payload: {e}")
-
-        # Step 7: Save raw payload to DB (fire-and-forget, never blocks response)
-        await _save_raw_webhook(cosmos_client, payload, body)
 
         # Step 8: Validate it's an Instagram webhook
         if payload.get("object") != "instagram":

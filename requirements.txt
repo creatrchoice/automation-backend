@@ -22,6 +22,7 @@ cryptography>=42.0.0
 
 # Azure Cosmos DB
 azure-cosmos>=4.5.0
+aiohttp>=3.9.0
 
 # Azure Key Vault (token encryption)
 azure-keyvault-secrets>=4.7.0
