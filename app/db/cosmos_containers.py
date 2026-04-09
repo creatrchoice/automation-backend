@@ -62,7 +62,12 @@ class DMContainers:
             "partition_key": PartitionKey(path="/org_id"),
             "description": "Pending team invitation tokens",
             "throughput": 400
-        }
+        },
+        "dm_oauth_states": {
+            "partition_key": PartitionKey(path="/id"),
+            "description": "Instagram OAuth CSRF state when Redis is unavailable",
+            "throughput": 400
+        },
     }
 
     @staticmethod
@@ -192,6 +197,7 @@ CONTAINER_SCHEDULED_TASKS = "dm_scheduled_tasks"
 CONTAINER_ANALYTICS = "dm_analytics"
 CONTAINER_ORGANIZATIONS = "dm_organizations"
 CONTAINER_INVITATIONS = "dm_invitations"
+CONTAINER_OAUTH_STATES = "dm_oauth_states"
 
 ALL_CONTAINERS = [
     CONTAINER_USERS,
@@ -204,6 +210,7 @@ ALL_CONTAINERS = [
     CONTAINER_ANALYTICS,
     CONTAINER_ORGANIZATIONS,
     CONTAINER_INVITATIONS,
+    CONTAINER_OAUTH_STATES,
 ]
 
 
