@@ -39,6 +39,42 @@ INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 USERS_CONTAINER = CONTAINER_USERS
 
 
+async def _ensure_instagram_not_linked_to_other_user(
+    accounts_container,
+    ig_user_id: str,
+    owner_user_id: str,
+) -> None:
+    """
+    Enforce: one Instagram professional account (ig_user_id) → at most one app user.
+
+    - A single app user may connect many Instagram accounts (many Cosmos docs with the
+      same user_id and different ig_user_id / id).
+    - The same ig_user_id must not appear on a document owned by a different user_id.
+    - Same user reconnecting the same IG (upsert) is allowed.
+    """
+    query = "SELECT c.id, c.user_id FROM c WHERE c.ig_user_id = @ig_user_id"
+    async for row in accounts_container.query_items(
+        query=query,
+        parameters=[{"name": "@ig_user_id", "value": ig_user_id}],
+        enable_cross_partition_query=True,
+    ):
+        if row.get("user_id") != owner_user_id:
+            logger.warning(
+                "Instagram ig_user_id=%s already linked to user_id=%s; connect attempt by %s rejected",
+                ig_user_id,
+                row.get("user_id"),
+                owner_user_id,
+            )
+            raise DuplicateEntityError(
+                message=f"Instagram account {ig_user_id} already linked to another app user",
+                user_title="Instagram Already Connected",
+                user_message=(
+                    "This Instagram account is already connected to another user. "
+                    "Disconnect it from that account first, or use a different Instagram account."
+                ),
+            )
+
+
 async def _find_user_org_id(cosmos_client, user_id: str) -> Optional[str]:
     """Look up the user's organization id (if any). Returns None if not a member of any org."""
     try:
@@ -512,6 +548,15 @@ async def instagram_callback(
                     user_message="Only Creator and Business Instagram accounts can use messaging automation. Please switch your account type and try again.",
                 )
 
+            accounts_container = await cosmos_client.get_async_container_client(
+                INSTAGRAM_TOKEN_CONTAINER
+            )
+            await _ensure_instagram_not_linked_to_other_user(
+                accounts_container,
+                ig_user_id,
+                owner_user_id,
+            )
+
             # Step 5: Store in Cosmos DB
             account_id = f"instagram_{ig_user_id}"
             account_doc = {
@@ -532,9 +577,6 @@ async def instagram_callback(
                 "updated_at": None,
             }
 
-            accounts_container = await cosmos_client.get_async_container_client(
-                INSTAGRAM_TOKEN_CONTAINER
-            )
             await accounts_container.upsert_item(body=account_doc)
 
             # Step 6: Subscribe to webhook events (messages, messaging_postbacks, comments)
@@ -574,7 +616,7 @@ async def instagram_callback(
                 status_code=302,
             )
 
-    except (BadRequestError, ExternalServiceError) as exc:
+    except (BadRequestError, ExternalServiceError, DuplicateEntityError) as exc:
         is_api_call = "application/json" in request.headers.get("accept", "")
         if is_api_call:
             raise exc
