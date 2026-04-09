@@ -7,6 +7,8 @@ import uuid
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
 from fastapi import APIRouter, Request, status, Depends, Query
 from fastapi.responses import RedirectResponse
 import httpx
@@ -23,7 +25,6 @@ from app.core.errors import (
     BadRequestError,
     InternalServerError,
     ExternalServiceError,
-    RedisUnavailableError,
 )
 from app.api.deps import (
     get_redis_client,
@@ -31,7 +32,12 @@ from app.api.deps import (
     create_access_token,
     get_current_user,
 )
-from app.db.cosmos_containers import CONTAINER_USERS, CONTAINER_IG_ACCOUNTS, CONTAINER_ORGANIZATIONS
+from app.db.cosmos_containers import (
+    CONTAINER_USERS,
+    CONTAINER_IG_ACCOUNTS,
+    CONTAINER_ORGANIZATIONS,
+    CONTAINER_OAUTH_STATES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +47,67 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 CSRF_STATE_EXPIRY = 600  # 10 minutes
 INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 USERS_CONTAINER = CONTAINER_USERS
+
+
+def _oauth_expires_at_utc(expires_raw) -> Optional[datetime]:
+    """Parse expires_at from Cosmos (ISO string) to timezone-aware UTC."""
+    if not expires_raw:
+        return None
+    try:
+        s = str(expires_raw).replace("Z", "+00:00") if str(expires_raw).endswith("Z") else str(expires_raw)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _store_oauth_state_cosmos(cosmos_client, state: str, user_id: str) -> None:
+    """Persist OAuth CSRF state when Redis is unavailable (partition key = id = state)."""
+    container = await cosmos_client.get_async_container_client(CONTAINER_OAUTH_STATES)
+    expires = datetime.now(timezone.utc) + timedelta(seconds=CSRF_STATE_EXPIRY)
+    await container.upsert_item(
+        body={
+            "id": state,
+            "user_id": user_id,
+            "expires_at": expires.isoformat(),
+            "type": "oauth_state",
+        }
+    )
+
+
+async def _consume_oauth_state_cosmos(cosmos_client, state: str) -> Optional[str]:
+    """
+    Read and delete OAuth state document; return user_id if valid and not expired.
+    """
+    container = await cosmos_client.get_async_container_client(CONTAINER_OAUTH_STATES)
+    try:
+        doc = await container.read_item(item=state, partition_key=state)
+    except CosmosResourceNotFoundError:
+        return None
+
+    exp = _oauth_expires_at_utc(doc.get("expires_at"))
+    if exp is not None and datetime.now(timezone.utc) > exp:
+        try:
+            await container.delete_item(item=state, partition_key=state)
+        except CosmosResourceNotFoundError:
+            pass
+        return None
+
+    uid = doc.get("user_id")
+    if uid is None:
+        try:
+            await container.delete_item(item=state, partition_key=state)
+        except CosmosResourceNotFoundError:
+            pass
+        return None
+
+    try:
+        await container.delete_item(item=state, partition_key=state)
+    except CosmosResourceNotFoundError:
+        pass
+    return str(uid)
 
 
 async def _ensure_instagram_not_linked_to_other_user(
@@ -409,14 +476,30 @@ async def login(
 async def get_instagram_state(
     current_user: dict = Depends(get_current_user),
     redis_client=Depends(get_redis_client),
+    cosmos_client=Depends(get_cosmos_client),
 ):
-    """Generate CSRF state token for Instagram OAuth flow."""
+    """Generate CSRF state token for Instagram OAuth flow.
+
+    Stores state in Redis when possible; falls back to Cosmos DB (`dm_oauth_states`)
+    if Redis is down or misconfigured (e.g. TLS issues on Redis Cloud).
+    """
     try:
         state = secrets.token_urlsafe(32)
         user_id = current_user.get("sub")
 
         redis_key = f"oauth_state:{state}"
-        await redis_client.setex(redis_key, CSRF_STATE_EXPIRY, user_id)
+        stored_in_redis = False
+        try:
+            await redis_client.setex(redis_key, CSRF_STATE_EXPIRY, user_id)
+            stored_in_redis = True
+        except (RedisError, ssl.SSLError, OSError) as e:
+            logger.warning(
+                "OAuth state: Redis unavailable (%s); storing CSRF state in Cosmos DB",
+                e,
+            )
+
+        if not stored_in_redis:
+            await _store_oauth_state_cosmos(cosmos_client, state, user_id)
 
         auth_url = (
             f"https://www.instagram.com/oauth/authorize"
@@ -432,22 +515,6 @@ async def get_instagram_state(
             "authorization_url": auth_url,
         }
 
-    except (RedisError, ssl.SSLError) as e:
-        # Redis Cloud requires TLS (rediss); plain redis:// causes SSL record layer failure.
-        logger.error(
-            "OAuth state failed: Redis/SSL error (use rediss / REDIS_SSL for Redis Cloud; "
-            "verify REDIS_HOST, REDIS_PORT, REDIS_PASSWORD): %s",
-            e,
-            exc_info=True,
-        )
-        raise RedisUnavailableError(
-            message=f"Redis error during OAuth state: {e}",
-            user_title="Connection Unavailable",
-            user_message=(
-                "Could not reserve a secure session for Instagram login. "
-                "If this continues, the app session store may be unavailable."
-            ),
-        )
     except Exception as e:
         logger.error(f"OAuth state generation error: {e}", exc_info=True)
         raise InternalServerError(
@@ -467,20 +534,31 @@ async def instagram_callback(
 ):
     """Handle Instagram OAuth callback (Instagram Login flow, no Facebook Page required)."""
     try:
-        # Step 1: Verify CSRF state
+        # Step 1: Verify CSRF state (Redis first, then Cosmos fallback)
         redis_key = f"oauth_state:{state}"
-        state_valid = await redis_client.get(redis_key)
+        owner_user_id: Optional[str] = None
 
-        if not state_valid:
+        try:
+            state_valid = await redis_client.get(redis_key)
+            if state_valid:
+                owner_user_id = (
+                    state_valid.decode()
+                    if isinstance(state_valid, bytes)
+                    else str(state_valid)
+                )
+                await redis_client.delete(redis_key)
+        except (RedisError, ssl.SSLError, OSError) as e:
+            logger.warning("OAuth callback: Redis unavailable (%s); trying Cosmos for CSRF state", e)
+
+        if not owner_user_id:
+            owner_user_id = await _consume_oauth_state_cosmos(cosmos_client, state)
+
+        if not owner_user_id:
             raise BadRequestError(
                 message="Invalid or expired OAuth state",
                 user_title="Session Expired",
                 user_message="Your connection session has expired. Please try connecting again.",
             )
-
-        # state_valid contains the user_id stored during get_instagram_state
-        owner_user_id = state_valid.decode() if isinstance(state_valid, bytes) else str(state_valid)
-        await redis_client.delete(redis_key)
 
         # Step 2: Exchange code for short-lived token
         async with httpx.AsyncClient() as client:
