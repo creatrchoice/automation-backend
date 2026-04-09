@@ -10,6 +10,7 @@ import redis.asyncio as aioredis
 from app.core.config import dm_settings as settings
 from app.core.errors import UnauthorizedError, TokenExpiredError, InvalidTokenError
 from app.db.cosmos_db import CosmosDBClient
+from app.db.redis import redis_should_use_tls
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +35,15 @@ async def get_redis_client() -> aioredis.Redis:
     global _redis_client
     if _redis_client is None:
         import ssl as ssl_module
-        scheme = "rediss" if settings.REDIS_SSL else "redis"
+
+        use_tls = redis_should_use_tls()
+        scheme = "rediss" if use_tls else "redis"
         kwargs = {
             "username": settings.REDIS_USERNAME if settings.REDIS_USERNAME else None,
             "password": settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
             "decode_responses": True,
         }
-        if settings.REDIS_SSL:
+        if use_tls:
             kwargs["ssl_cert_reqs"] = ssl_module.CERT_NONE
         _redis_client = aioredis.from_url(
             f"{scheme}://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}",
