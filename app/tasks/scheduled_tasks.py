@@ -147,7 +147,11 @@ class ScheduledTaskExecutor:
                 "task_id": task_id,
             }
 
-            message = message_builder.build_message(message_template, context)
+            message = message_builder.build_message(
+                message_template,
+                context,
+                automation_id=task.get("automation_id"),
+            )
 
             if not message:
                 logger.error(f"Failed to build message for task {task_id}")
@@ -155,7 +159,7 @@ class ScheduledTaskExecutor:
                 return False
 
             # Send message
-            instagram_api.send_dm(account_id, contact_id, message)
+            instagram_api.send_dm_sync(account_id, contact_id, message)
 
             # Log delivery
             self._log_message_delivery(account_id, contact_id, task_id, message, "sent")

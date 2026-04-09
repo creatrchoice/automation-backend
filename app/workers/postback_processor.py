@@ -557,11 +557,13 @@ class PostbackProcessor:
                 "contact_id": contact_id,
             }
 
-            built_message = message_builder.build_message(message, context)
+            built_message = message_builder.build_message(
+                message, context, automation_id=automation.get("id")
+            )
 
             if built_message:
                 # Send message
-                instagram_api.send_dm(account_id, contact_id, built_message)
+                instagram_api.send_dm_sync(account_id, contact_id, built_message)
 
                 # Log delivery
                 self._log_message_delivery(

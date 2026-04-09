@@ -3,7 +3,7 @@ import logging
 import json
 import re
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 
 from app.core.config import dm_settings
@@ -82,7 +82,7 @@ class AutomationEngine:
                 SELECT * FROM c
                 WHERE c.account_id = @account_id
                 AND c.enabled = true
-                AND c.deleted_at = null
+                AND (NOT IS_DEFINED(c.deleted_at) OR c.deleted_at = null)
             """
             automations = list(container.query_items(
                 query=query,
@@ -161,7 +161,7 @@ class AutomationEngine:
             logger.error(f"Error matching automations: {str(e)}")
             return []
 
-    def _match_keywords(self, text: str, keywords: List[Dict[str, str]]) -> bool:
+    def _match_keywords(self, text: str, keywords: List[Union[Dict[str, Any], str]]) -> bool:
         """
         Check if text matches any of the keywords.
 
@@ -183,6 +183,12 @@ class AutomationEngine:
             return True  # No keywords = match all
 
         for keyword in keywords:
+            if isinstance(keyword, str):
+                keyword = {
+                    "match_type": "contains",
+                    "value": keyword,
+                    "case_sensitive": False,
+                }
             match_type = keyword.get("match_type", "contains").lower()
             value = keyword.get("value", "")
             case_sensitive = keyword.get("case_sensitive", False)
@@ -288,36 +294,35 @@ class AutomationEngine:
                 result["status"] = "rate_limited"
                 return result
 
-            # Step 4: Resolve branch (follower or non-follower)
+            # Step 4: Resolve branch (follower or non-follower); fallback to top-level steps (UI)
             branch = "follower_branch" if is_follower else "non_follower_branch"
-            steps = automation.get(branch, [])
+            steps = automation.get(branch) or automation.get("steps") or []
 
             if not steps:
-                logger.debug(f"No steps in {branch} for automation {automation_id}")
+                logger.debug(f"No steps in {branch} or steps[] for automation {automation_id}")
                 result["status"] = "no_steps"
                 return result
 
             # Step 5: Get first step and send DM
             first_step = steps[0]
             step_id = first_step.get("id")
-            message_template = first_step.get("message")
+            message_template = MessageBuilder.resolve_message_template(first_step)
 
             if not message_template:
-                logger.error(f"No message template in step {step_id}")
+                logger.error(f"No resolvable message template in step {step_id}")
                 result["status"] = "no_message"
                 return result
 
-            # Build message payload with postback encoding
-            payload = MessageBuilder.build_message_with_postback_payloads(
+            message_template = MessageBuilder.encode_postbacks_in_canonical_template(
                 message_template, automation_id
             )
 
-            # Send via Instagram API
+            # Send via Instagram API (expects {type, content} — see instagram_api._build_send_message_request)
             try:
                 api_result = await self.instagram_api.send_dm(
                     account_id=account_id,
                     recipient_id=sender_id,
-                    message_payload=message_template
+                    message_payload=message_template,
                 )
 
                 message_id = api_result.get("message_id")

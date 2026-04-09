@@ -1,4 +1,5 @@
 """Instagram Graph API service for DM automation."""
+import asyncio
 import logging
 from typing import Dict, Any, Optional, List
 import httpx
@@ -56,7 +57,8 @@ class InstagramAPI:
         self,
         account_id: str,
         recipient_id: str,
-        message_payload: Dict[str, Any]
+        message_payload: Dict[str, Any],
+        comment_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a direct message via Instagram API.
@@ -66,10 +68,17 @@ class InstagramAPI:
         - generic_template: Card with buttons
         - carousel: Multiple cards with buttons
 
+        For comment-triggered automations, pass comment_id to send the DM
+        as a reply to the comment. Instagram requires:
+            recipient: { comment_id: "<COMMENT_ID>" }
+        instead of:
+            recipient: { id: "<USER_ID>" }
+
         Args:
             account_id: Instagram account ID (business account)
-            recipient_id: Recipient's IG user ID
+            recipient_id: Recipient's IG user ID (used for regular DMs)
             message_payload: Message payload dict with 'type' and 'content'
+            comment_id: If set, sends DM as reply to this comment (for comment automations)
 
         Returns:
             API response with message_id
@@ -82,19 +91,28 @@ class InstagramAPI:
         try:
             logger.info(f"Sending DM to {recipient_id} from account {account_id}")
 
-            # Get decrypted access token
-            access_token = self.token_manager.get_decrypted_account_token(account_id)
+            account = self.token_manager.get_account_document(account_id)
+            encrypted = account.get("access_token")
+            if not encrypted:
+                logger.error(f"No access token found for account {account_id}")
+                raise ValueError(f"No access token for account {account_id}")
+            access_token = self.token_manager.decrypt_token(encrypted)
+            graph_user_id = self.token_manager.graph_user_id_from_document(
+                account, account_id
+            )
 
             # Check rate limit
             if not self.rate_limiter.check_rate_limit(account_id):
                 logger.warning(f"Rate limit exceeded for account {account_id}")
                 raise RateLimitExceeded(f"Account {account_id} has exceeded DM rate limit")
 
-            # Build API endpoint
-            url = f"{self.api_base_url}/{self.api_version}/{account_id}/messages"
+            # Graph API path uses IG user id, not internal instagram_… document id
+            url = f"{self.api_base_url}/{self.api_version}/{graph_user_id}/messages"
 
             # Build request body
-            request_body = self._build_send_message_request(recipient_id, message_payload)
+            request_body = self._build_send_message_request(
+                recipient_id, message_payload, comment_id=comment_id
+            )
 
             # Make API call
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -144,17 +162,52 @@ class InstagramAPI:
             logger.error(f"Error sending DM: {str(e)}")
             raise InstagramAPIError(f"Failed to send DM: {str(e)}")
 
+    def send_dm_sync(
+        self,
+        account_id: str,
+        recipient_id: str,
+        message_payload: Dict[str, Any],
+        comment_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run async send_dm from synchronous worker code (webhooks, Celery).
+
+        Uses asyncio.run(); do not call from inside a running event loop.
+        """
+        return asyncio.run(
+            self.send_dm(
+                account_id,
+                recipient_id,
+                message_payload,
+                comment_id=comment_id,
+            )
+        )
+
     def _build_send_message_request(
         self,
         recipient_id: str,
-        message_payload: Dict[str, Any]
+        message_payload: Dict[str, Any],
+        comment_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Build request body for send message API call."""
+        """
+        Build request body for send message API call.
+
+        For comment-triggered DMs, Instagram requires:
+            recipient: { comment_id: "<COMMENT_ID>" }
+        For regular DMs:
+            recipient: { id: "<USER_ID>" }
+        """
         payload_type = message_payload.get("type", "text").lower()
         content = message_payload.get("content", {})
 
+        # Comment-triggered DMs use comment_id as recipient (Instagram API requirement)
+        if comment_id:
+            recipient = {"comment_id": comment_id}
+        else:
+            recipient = {"id": recipient_id}
+
         request = {
-            "recipient": {"id": recipient_id},
+            "recipient": recipient,
             "messaging_type": "MESSAGE_TYPE_RESPONSE"
         }
 
@@ -201,11 +254,19 @@ class InstagramAPI:
         try:
             logger.debug(f"Checking follow status for user {ig_user_id} on account {account_id}")
 
-            access_token = self.token_manager.get_decrypted_account_token(account_id)
+            account = self.token_manager.get_account_document(account_id)
+            encrypted = account.get("access_token")
+            if not encrypted:
+                logger.error(f"No access token found for account {account_id}")
+                raise ValueError(f"No access token for account {account_id}")
+            access_token = self.token_manager.decrypt_token(encrypted)
+            graph_user_id = self.token_manager.graph_user_id_from_document(
+                account, account_id
+            )
 
             # Query the followers edge to check if user is in the list
             # Note: This requires the user to have granted permission and the app to have access
-            url = f"{self.api_base_url}/{self.api_version}/{account_id}/followers"
+            url = f"{self.api_base_url}/{self.api_version}/{graph_user_id}/followers"
 
             params = {
                 "access_token": access_token,
