@@ -173,4 +173,17 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    health = {"status": "healthy", "api": "ok"}
+
+    try:
+        from app.tasks.celery_app import celery_app
+        i = celery_app.control.inspect(timeout=5)
+        stats = i.stats()
+        if stats:
+            health["worker"] = "ok"
+        else:
+            health["worker"] = "noactive"
+    except Exception as e:
+        health["worker"] = f"error: {str(e)[:50]}"
+
+    return health
