@@ -256,7 +256,7 @@ async def disconnect_account(
             try:
                 async with httpx.AsyncClient() as client:
                     await client.delete(
-                        f"https://graph.instagram.com/v21.0/{page_id}/subscribed_apps",
+                        f"{settings.INSTAGRAM_API_BASE_URL}/{settings.INSTAGRAM_API_VERSION}/{page_id}/subscribed_apps",
                         params={"access_token": access_token},
                     )
             except Exception as e:

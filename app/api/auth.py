@@ -124,11 +124,35 @@ async def _ensure_instagram_not_linked_to_other_user(
     - Same user reconnecting the same IG (upsert) is allowed.
     """
     query = "SELECT c.id, c.user_id FROM c WHERE c.ig_user_id = @ig_user_id"
-    async for row in accounts_container.query_items(
-        query=query,
-        parameters=[{"name": "@ig_user_id", "value": ig_user_id}],
-        enable_cross_partition_query=True,
-    ):
+    query_params = [{"name": "@ig_user_id", "value": ig_user_id}]
+
+    logger.info(
+        "Checking IG account ownership for ig_user_id=%s requested_by_user_id=%s",
+        ig_user_id,
+        owner_user_id,
+    )
+
+    matched_accounts = [
+        row
+        async for row in accounts_container.query_items(
+            query=query,
+            parameters=query_params,
+        )
+    ]
+
+    logger.info(
+        "Found %s existing account record(s) for ig_user_id=%s",
+        len(matched_accounts),
+        ig_user_id,
+    )
+
+    for row in matched_accounts:
+        logger.info(
+            "Evaluating existing IG link: record_id=%s linked_user_id=%s requested_by_user_id=%s",
+            row.get("id"),
+            row.get("user_id"),
+            owner_user_id,
+        )
         if row.get("user_id") != owner_user_id:
             logger.warning(
                 "Instagram ig_user_id=%s already linked to user_id=%s; connect attempt by %s rejected",
@@ -144,6 +168,18 @@ async def _ensure_instagram_not_linked_to_other_user(
                     "Disconnect it from that account first, or use a different Instagram account."
                 ),
             )
+
+    logger.info(
+        "Ownership check passed for ig_user_id=%s requested_by_user_id=%s",
+        ig_user_id,
+        owner_user_id,
+    )
+
+    logger.info(
+        "Found %s existing account record(s) for ig_user_id=%s",
+        len(matched_accounts),
+        ig_user_id,
+    )
 
 
 async def _find_user_org_id(cosmos_client, user_id: str) -> Optional[str]:
@@ -180,7 +216,7 @@ async def _subscribe_webhook_events(ig_user_id: str, access_token: str) -> bool:
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"https://graph.instagram.com/v21.0/{ig_user_id}/subscribed_apps",
+                f"{dm_settings.INSTAGRAM_API_BASE_URL}/{dm_settings.INSTAGRAM_API_VERSION}/{ig_user_id}/subscribed_apps",
                 params={
                     "subscribed_fields": subscribed_fields,
                     "access_token": access_token,
@@ -583,9 +619,8 @@ async def instagram_callback(
 
             token_data = token_response.json()
             short_token = token_data.get("access_token")
-            ig_user_id = str(token_data.get("user_id"))
 
-            if not short_token or not ig_user_id:
+            if not short_token:
                 raise BadRequestError(
                     message="Missing token or user ID from Instagram",
                     user_message="Instagram returned an incomplete response. Please try again.",
@@ -621,7 +656,7 @@ async def instagram_callback(
 
             # Step 4: Fetch user profile
             profile_response = await client.get(
-                f"https://graph.instagram.com/v21.0/me",
+                f"{dm_settings.INSTAGRAM_API_BASE_URL}/{dm_settings.INSTAGRAM_API_VERSION}/me",
                 params={
                     "fields": "user_id,username,name,account_type,profile_picture_url,followers_count",
                     "access_token": long_token,
@@ -638,6 +673,7 @@ async def instagram_callback(
 
             profile_data = profile_response.json()
             account_type = profile_data.get("account_type")
+            ig_user_id = profile_data.get("user_id")
 
             if account_type not in ["CREATOR", "BUSINESS"]:
                 raise BadRequestError(

@@ -15,7 +15,7 @@ class DMAutomationSettings(BaseSettings):
         description="OAuth redirect URI registered in Meta Developer Dashboard"
     )
     INSTAGRAM_BUSINESS_ACCOUNT_ID: str = Field(default="", description="Default Instagram Business Account ID")
-    INSTAGRAM_API_VERSION: str = Field(default="v21.0", description="Instagram Graph API version")
+    INSTAGRAM_API_VERSION: str = Field(default="v25.0", description="Instagram Graph API version")
     INSTAGRAM_API_BASE_URL: str = Field(
         default="https://graph.instagram.com",
         description="Instagram Graph API base URL"

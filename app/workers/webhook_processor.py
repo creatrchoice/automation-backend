@@ -1,15 +1,17 @@
 """Main webhook event processor and dispatcher."""
 import logging
 import json
+import time
 from typing import Dict, Any, Optional
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timedelta
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
 from app.core.config import dm_settings
 from app.workers.comment_processor import process_comment_webhook
 from app.workers.message_processor import process_message_webhook
 from app.workers.postback_processor import process_postback_webhook
 from app.db.cosmos_db import cosmos_db
+from app.db.cosmos_containers import CONTAINER_WEBHOOK_EVENTS
 from app.db.redis import redis_client
 
 logger = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ class WebhookProcessor:
         """Initialize webhook processor."""
         self.service_bus_client: Optional[ServiceBusClient] = None
         self.queue_receiver = None
-        self.container_name = dm_settings.DM_WEBHOOK_EVENTS_CONTAINER
+        self.container_name = CONTAINER_WEBHOOK_EVENTS
 
     def initialize_service_bus(self) -> None:
         """Initialize Azure Service Bus connection."""
@@ -167,14 +169,52 @@ class WebhookProcessor:
         Returns:
             True if duplicate, False otherwise
         """
-        dedup_key = f"webhook:dedup:{event_id}"
-        if redis_client.exists(dedup_key):
-            return True
+        if not event_id or event_id == "unknown":
+            logger.debug("Skipping dedup check for missing/unknown event_id")
+            return False
 
-        # Mark as processed
+        dedup_key = f"webhook:dedup:{event_id}"
         ttl_seconds = dm_settings.DEDUP_TTL_HOURS * 3600
-        redis_client.setex(dedup_key, ttl_seconds, "1")
-        return False
+
+        # Preferred path: Redis cache dedup for fast checks.
+        try:
+            if redis_client.exists(dedup_key):
+                return True
+            redis_client.setex(dedup_key, ttl_seconds, "1")
+            return False
+        except Exception as redis_err:
+            logger.warning(
+                "Redis unavailable for dedup (event_id=%s), falling back to Cosmos DB: %s",
+                event_id,
+                redis_err,
+            )
+
+        # Fallback path: Cosmos DB dedup when Redis is unavailable.
+        try:
+            container = cosmos_db.get_container_client(self.container_name)
+            cutoff_iso = (datetime.utcnow() - timedelta(seconds=ttl_seconds)).isoformat()
+            query = (
+                "SELECT VALUE COUNT(1) FROM c "
+                "WHERE c.id = @event_id AND c.processed_at >= @cutoff"
+            )
+            existing = list(
+                container.query_items(
+                    query=query,
+                    parameters=[
+                        {"name": "@event_id", "value": event_id},
+                        {"name": "@cutoff", "value": cutoff_iso},
+                    ],
+                    enable_cross_partition_query=True,
+                )
+            )
+            return bool(existing and existing[0] > 0)
+        except Exception as cosmos_err:
+            logger.error(
+                "Cosmos dedup fallback failed for event_id=%s: %s. Continuing without dedup.",
+                event_id,
+                cosmos_err,
+            )
+            return False
 
     def _store_webhook_event(
         self, event: Dict[str, Any], event_type: WebhookEventType
@@ -249,21 +289,25 @@ class WebhookProcessor:
         This method runs indefinitely, processing messages from the queue.
         Should be run in a separate process/thread.
         """
-        if not self.service_bus_client:
-            self.initialize_service_bus()
-
         logger.info("Starting webhook message processing loop")
 
-        try:
-            while True:
+        while True:
+            try:
+                if not self.service_bus_client:
+                    self.initialize_service_bus()
+
                 messages = self.queue_receiver.receive_messages(
                     max_message_count=10, max_wait_time=30
                 )
 
                 for message in messages:
                     try:
-                        # Parse message body
-                        event_data = json.loads(str(message))
+                        # Parse message body from Service Bus message sections.
+                        raw_body = b"".join(
+                            part if isinstance(part, (bytes, bytearray)) else bytes(part)
+                            for part in message.body
+                        )
+                        event_data = json.loads(raw_body.decode("utf-8"))
 
                         # Process the event
                         self.process_webhook_event(event_data)
@@ -283,11 +327,15 @@ class WebhookProcessor:
                         # Requeue message for retry
                         self.queue_receiver.renew_message_lock(message)
 
-        except Exception as e:
-            logger.exception(f"Error in message processing loop: {str(e)}")
-            raise
-        finally:
-            self.close_service_bus()
+            except Exception as e:
+                logger.exception(
+                    "Error in message processing loop: %s. Retrying in 5 seconds.",
+                    str(e),
+                )
+                self.close_service_bus()
+                self.service_bus_client = None
+                self.queue_receiver = None
+                time.sleep(5)
 
     def process_webhook_synchronously(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """

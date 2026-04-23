@@ -6,11 +6,11 @@ from app.core.config import dm_settings
 class CeleryConfig:
     """Celery configuration."""
 
-    # Broker settings - prefer Service Bus, fallback to Redis
+    # Broker settings - Redis broker for Celery task queueing
     _redis_scheme = "rediss" if dm_settings.REDIS_SSL else "redis"
     _redis_url = f"{_redis_scheme}://{dm_settings.REDIS_USERNAME or ''}:{dm_settings.REDIS_PASSWORD or ''}@{dm_settings.REDIS_HOST or 'localhost'}:{dm_settings.REDIS_PORT or 6379}"
 
-    broker_url = dm_settings.AZURE_SERVICE_BUS_CONNECTION_STRING or f"{_redis_url}/0"
+    broker_url = f"{_redis_url}/0"
     broker_transport_options = {
         "visibility_timeout": 3600,  # 1 hour
         "max_retries": 3,

@@ -293,7 +293,7 @@ async def _dispatch_event(event_envelope: dict):
     """
     Dispatch a single event to the processing pipeline.
 
-    Tries Azure Service Bus first, falls back to Celery task.
+    Tries Azure Service Bus first, falls back to inline processing.
 
     Args:
         event_envelope: Wrapped event with metadata
@@ -301,42 +301,34 @@ async def _dispatch_event(event_envelope: dict):
     try:
         # Option 1: Azure Service Bus (preferred for production)
         if dm_settings.AZURE_SERVICE_BUS_CONNECTION_STRING:
-            from azure.servicebus.aio import ServiceBusClient
-            from azure.servicebus import ServiceBusMessage
+            try:
+                from azure.servicebus.aio import ServiceBusClient
+                from azure.servicebus import ServiceBusMessage
 
-            async with ServiceBusClient.from_connection_string(
-                dm_settings.AZURE_SERVICE_BUS_CONNECTION_STRING
-            ) as client:
-                sender = client.get_queue_sender(
-                    queue_name=dm_settings.AZURE_SERVICE_BUS_QUEUE_NAME
-                )
-                async with sender:
-                    message = ServiceBusMessage(
-                        json.dumps(event_envelope),
-                        session_id=event_envelope.get("ig_account_id", "default"),
+                async with ServiceBusClient.from_connection_string(
+                    dm_settings.AZURE_SERVICE_BUS_CONNECTION_STRING
+                ) as client:
+                    sender = client.get_queue_sender(
+                        queue_name=dm_settings.AZURE_SERVICE_BUS_QUEUE_NAME
                     )
-                    await sender.send_messages(message)
+                    async with sender:
+                        message = ServiceBusMessage(
+                            json.dumps(event_envelope),
+                            session_id=event_envelope.get("ig_account_id", "default"),
+                        )
+                        await sender.send_messages(message)
 
-            logger.debug(
-                f"Event enqueued to Service Bus for account {event_envelope.get('ig_account_id')}"
-            )
-            return
+                logger.debug(
+                    f"Event enqueued to Service Bus for account {event_envelope.get('ig_account_id')}"
+                )
+                return
+            except Exception as sb_err:
+                logger.warning(
+                    "Service Bus dispatch failed; falling back to inline processing: %s",
+                    sb_err,
+                )
 
-        # Option 2: Celery task (fallback for dev / when Service Bus is not configured)
-        try:
-            from app.tasks.celery_app import celery_app
-
-            celery_app.send_task(
-                "app.tasks.process_webhook_event",
-                args=[event_envelope],
-                queue="webhooks",
-            )
-            logger.debug("Event dispatched to Celery webhook queue")
-            return
-        except Exception as celery_err:
-            logger.warning(f"Celery dispatch failed: {celery_err}")
-
-        # Option 3: Inline processing (last resort, for local dev)
+        # Option 2: Inline processing fallback (for local/dev or queue failures)
         logger.warning("No async queue available - processing inline (not recommended for production)")
         from app.workers.webhook_processor import webhook_processor
         webhook_processor.process_webhook_synchronously(event_envelope)

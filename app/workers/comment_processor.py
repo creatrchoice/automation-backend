@@ -5,6 +5,12 @@ from datetime import datetime
 from app.core.config import dm_settings
 from app.db.cosmos_db import cosmos_db
 from app.db.redis import redis_client
+from app.db.cosmos_containers import (
+    CONTAINER_IG_ACCOUNTS,
+    CONTAINER_AUTOMATIONS,
+    CONTAINER_CONTACTS,
+    CONTAINER_MESSAGE_LOGS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +20,9 @@ class CommentProcessor:
 
     def __init__(self):
         """Initialize comment processor."""
-        self.automations_container = dm_settings.DM_AUTOMATIONS_CONTAINER
-        self.contacts_container = dm_settings.DM_CONTACTS_CONTAINER
-        self.message_logs_container = dm_settings.DM_MESSAGE_LOGS_CONTAINER
+        self.automations_container = CONTAINER_AUTOMATIONS
+        self.contacts_container = CONTAINER_CONTACTS
+        self.message_logs_container = CONTAINER_MESSAGE_LOGS
         self.automation_cache_ttl = dm_settings.AUTOMATION_CACHE_TTL_HOURS * 3600
 
     def process_comment_webhook(self, event: Dict[str, Any]) -> None:
@@ -149,21 +155,27 @@ class CommentProcessor:
         try:
             cache_key = f"account_map:{ig_user_id}"
 
-            # Try cache first
-            cached_account_id = redis_client.get(cache_key)
-            if cached_account_id:
-                logger.debug(f"Found account mapping in cache for {ig_user_id}")
-                return cached_account_id
+            # Try cache first (best-effort; do not fail lookup if Redis is down).
+            try:
+                cached_account_id = redis_client.get(cache_key)
+                if cached_account_id:
+                    logger.debug(f"Found account mapping in cache for {ig_user_id}")
+                    return cached_account_id
+            except Exception as redis_err:
+                logger.warning(
+                    "Redis unavailable for account_map lookup (ig_user_id=%s): %s",
+                    ig_user_id,
+                    redis_err,
+                )
 
             # Query Cosmos DB for account mapping
-            container = cosmos_db.get_container_client(
-                dm_settings.DM_IG_ACCOUNTS_CONTAINER
-            )
-            query = "SELECT c.account_id FROM c WHERE c.ig_user_id = @ig_user_id LIMIT 1"
+            container = cosmos_db.get_container_client(CONTAINER_IG_ACCOUNTS)
+            query = "SELECT TOP 1 c.account_id FROM c WHERE c.ig_user_id = @ig_user_id"
             results = list(
                 container.query_items(
                     query=query,
                     parameters=[{"name": "@ig_user_id", "value": ig_user_id}],
+                    enable_cross_partition_query=True,
                 )
             )
 
@@ -173,9 +185,16 @@ class CommentProcessor:
 
             account_id = results[0].get("account_id")
 
-            # Cache the mapping
-            cache_ttl = dm_settings.ACCOUNT_MAP_CACHE_TTL_HOURS * 3600
-            redis_client.setex(cache_key, cache_ttl, account_id)
+            # Cache the mapping (best-effort).
+            try:
+                cache_ttl = dm_settings.ACCOUNT_MAP_CACHE_TTL_HOURS * 3600
+                redis_client.setex(cache_key, cache_ttl, account_id)
+            except Exception as redis_err:
+                logger.warning(
+                    "Redis unavailable for account_map cache write (ig_user_id=%s): %s",
+                    ig_user_id,
+                    redis_err,
+                )
 
             logger.debug(f"Resolved account {account_id} for Instagram user {ig_user_id}")
             return account_id
