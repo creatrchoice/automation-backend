@@ -5,7 +5,13 @@ from datetime import datetime
 from enum import Enum
 from app.core.config import dm_settings
 from app.db.cosmos_db import cosmos_db
-from app.db.redis import redis_client
+from app.db.cosmos_containers import (
+    CONTAINER_CONTACTS,
+    CONTAINER_MESSAGE_LOGS,
+)
+from app.db.repositories.automation_repository import list_enabled_automations_for_account
+from app.services.automation_matcher import effective_automation_type, matches_message_context
+from app.workers.processor_utils import resolve_account_id_with_cache
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +29,8 @@ class MessageProcessor:
 
     def __init__(self):
         """Initialize message processor."""
-        self.automations_container = dm_settings.DM_AUTOMATIONS_CONTAINER
-        self.contacts_container = dm_settings.DM_CONTACTS_CONTAINER
-        self.message_logs_container = dm_settings.DM_MESSAGE_LOGS_CONTAINER
+        self.contacts_container = CONTAINER_CONTACTS
+        self.message_logs_container = CONTAINER_MESSAGE_LOGS
 
     def process_message_webhook(self, event: Dict[str, Any]) -> None:
         """
@@ -213,88 +218,11 @@ class MessageProcessor:
             Account ID or None
         """
         try:
-            cache_key = f"account_map:{ig_user_id}"
-
-            # Try cache first
-            cached_account_id = redis_client.get(cache_key)
-            if cached_account_id:
-                logger.debug(f"Found account mapping in cache for {ig_user_id}")
-                return (
-                    cached_account_id.decode()
-                    if isinstance(cached_account_id, bytes)
-                    else str(cached_account_id)
-                )
-
-            # Query Cosmos DB (documents use c.id; account_id may mirror id)
-            container = cosmos_db.get_container_client(
-                dm_settings.DM_IG_ACCOUNTS_CONTAINER
-            )
-            query = "SELECT c.id, c.account_id FROM c WHERE c.ig_user_id = @ig_user_id"
-            results = list(
-                container.query_items(
-                    query=query,
-                    parameters=[{"name": "@ig_user_id", "value": ig_user_id}],
-                    enable_cross_partition_query=True,
-                )
-            )
-
-            if not results:
-                logger.warning(f"No account found for Instagram user {ig_user_id}")
-                return None
-
-            row = results[0]
-            account_id = row.get("account_id") or row.get("id")
-
-            # Cache the mapping
-            cache_ttl = dm_settings.ACCOUNT_MAP_CACHE_TTL_HOURS * 3600
-            redis_client.setex(cache_key, cache_ttl, account_id)
-
-            return account_id
+            return resolve_account_id_with_cache(ig_user_id, logger)
 
         except Exception as e:
             logger.error(f"Error resolving account ID: {str(e)}")
             return None
-
-    def _effective_automation_type(self, automation: Dict[str, Any]) -> str:
-        """Derive worker automation type from automation_type or trigger (API shape)."""
-        explicit = automation.get("automation_type")
-        if explicit:
-            return str(explicit).lower().replace("-", "_")
-        trigger = automation.get("trigger") or {}
-        tt = trigger.get("type") or "message_received"
-        if isinstance(tt, str):
-            tt = tt.lower().replace("-", "_")
-        else:
-            tt = "message_received"
-        if tt in ("keyword", "dm_keyword"):
-            return "dm_keyword"
-        if tt in ("story_reaction", "story_reply", "story"):
-            return "story_reaction"
-        if tt == "message_received" and (trigger.get("keywords") or []):
-            return "dm_keyword"
-        return tt
-
-    def _keywords_for_automation(self, automation: Dict[str, Any]) -> List[str]:
-        raw = automation.get("keywords")
-        if raw is None:
-            raw = (automation.get("trigger") or {}).get("keywords", [])
-        out: List[str] = []
-        for k in raw or []:
-            if isinstance(k, dict):
-                v = k.get("value") or k.get("text") or ""
-                if v:
-                    out.append(str(v))
-            elif k is not None and str(k).strip():
-                out.append(str(k).strip())
-        return out
-
-    def _trigger_story_ids(self, automation: Dict[str, Any]) -> List[str]:
-        ids = automation.get("trigger_stories")
-        if ids is None:
-            ids = (automation.get("trigger") or {}).get("trigger_stories", [])
-        if not ids:
-            return []
-        return [str(s) for s in ids if s is not None]
 
     def _refresh_messaging_window(self, account_id: str, contact_id: str) -> None:
         """
@@ -356,7 +284,6 @@ class MessageProcessor:
             List of matching automations
         """
         try:
-            container = cosmos_db.get_container_client(self.automations_container)
             matching: List[Dict[str, Any]] = []
             seen_ids = set()
 
@@ -369,23 +296,14 @@ class MessageProcessor:
             else:
                 search_types = {"message_received"}
 
-            query = (
-                "SELECT * FROM c WHERE c.account_id = @account_id AND c.status = 'active'"
-            )
-            results = list(
-                container.query_items(
-                    query=query,
-                    parameters=[{"name": "@account_id", "value": account_id}],
-                    enable_cross_partition_query=True,
-                )
-            )
+            results = list_enabled_automations_for_account(account_id)
 
             for automation in results:
                 if automation.get("enabled") is False:
                     continue
                 if automation.get("deleted_at"):
                     continue
-                eff = self._effective_automation_type(automation)
+                eff = effective_automation_type(automation)
                 if eff not in search_types:
                     continue
                 aid = automation.get("id")
@@ -416,27 +334,7 @@ class MessageProcessor:
             True if conditions match
         """
         try:
-            eff = self._effective_automation_type(automation)
-
-            if eff == "dm_keyword":
-                keywords = self._keywords_for_automation(automation)
-                message_text = context.get("message_text", "").lower()
-                if not keywords:
-                    return False
-                for keyword in keywords:
-                    if keyword.lower() in message_text:
-                        return True
-                return False
-
-            if eff == "story_reaction":
-                story_id = context.get("story_id")
-                trigger_stories = self._trigger_story_ids(automation)
-                if not trigger_stories:
-                    return False
-                return story_id in trigger_stories
-
-            # message_received and others: match inbound
-            return True
+            return matches_message_context(automation, context)
 
         except Exception as e:
             logger.error(f"Error checking automation conditions: {str(e)}")

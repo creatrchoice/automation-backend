@@ -1,7 +1,7 @@
 """Token management service: encryption, decryption, and refresh."""
 import logging
 from typing import Any, Dict, Optional
-from app.core.security import TokenEncryption
+from app.core.security import TokenEncryption, SecurityError
 from app.core.config import dm_settings
 from app.db.cosmos_db import CosmosDBClient
 from app.db.cosmos_containers import CONTAINER_IG_ACCOUNTS

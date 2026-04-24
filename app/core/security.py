@@ -30,52 +30,6 @@ class TokenData(BaseModel):
     token_type: str = "access"  # access or refresh
 
 
-class WebhookVerifier:
-    """Verify webhook signatures from Instagram."""
-
-    @staticmethod
-    def verify_webhook_signature(
-        body: str,
-        signature: str,
-        verify_token: str
-    ) -> bool:
-        """
-        Verify Instagram webhook signature using HMAC-SHA256.
-
-        Args:
-            body: Raw webhook request body
-            signature: X-Hub-Signature header value (sha1=xxx)
-            verify_token: Expected verification token
-
-        Returns:
-            True if signature is valid, False otherwise
-
-        Raises:
-            SecurityError: If verification token doesn't match
-        """
-        if not verify_token or verify_token != dm_settings.WEBHOOK_VERIFY_TOKEN:
-            raise SecurityError("Webhook verification token mismatch")
-
-        # Extract algorithm and hash from signature header
-        try:
-            algo, signature_hash = signature.split("=", 1)
-        except (ValueError, AttributeError):
-            return False
-
-        if algo != "sha256":
-            return False
-
-        # Calculate expected signature
-        expected_signature = hmac.new(
-            dm_settings.INSTAGRAM_APP_SECRET.encode(),
-            body.encode(),
-            hashlib.sha256
-        ).hexdigest()
-
-        # Constant-time comparison to prevent timing attacks
-        return hmac.compare_digest(signature_hash, expected_signature)
-
-
 class JWTManager:
     """JWT token generation and validation."""
 

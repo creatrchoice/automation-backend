@@ -6,6 +6,12 @@ displays the raw data, and sends a DM reply to the sender.
 Usage:
     python test_reply_from_db.py
 """
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Manual Cosmos+Instagram validation script; excluded from CI."
+)
+
 import json
 import os
 import sys

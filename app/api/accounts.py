@@ -16,7 +16,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
 
-from app.db.cosmos_containers import CONTAINER_IG_ACCOUNTS
+from app.db.cosmos_containers import (
+    CONTAINER_IG_ACCOUNTS,
+    CONTAINER_AUTOMATIONS,
+    CONTAINER_CONTACTS,
+    CONTAINER_MESSAGE_LOGS,
+    CONTAINER_WEBHOOK_EVENTS,
+    CONTAINER_SCHEDULED_TASKS,
+    CONTAINER_ANALYTICS,
+)
 INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 
 
@@ -172,13 +180,14 @@ async def disconnect_account(
     redis_client=Depends(get_redis_client),
 ):
     """
-    Disconnect a connected Instagram account.
+    Permanently delete a connected Instagram account and all related data.
 
-    Disconnection process:
-    1. Pause all automations for this account
-    2. Unsubscribe from webhooks
-    3. Soft delete account (set status to 'deleted')
-    4. Clear Redis cache
+    Deletion process:
+    1. Unsubscribe from webhooks (best effort)
+    2. Hard-delete automations, contacts, message logs, webhook events,
+       scheduled tasks, and analytics for this account
+    3. Hard-delete the account document
+    4. Clear Redis cache keys (best effort)
 
     Args:
         account_id: Instagram account ID
@@ -223,32 +232,7 @@ async def disconnect_account(
                 detail="Access denied",
             )
 
-        # Step 1: Pause all automations
-        automations_container = await cosmos_client.get_async_container_client(
-            "automations"
-        )
-        pause_query = (
-            "SELECT * FROM automations "
-            "WHERE automations.account_id = @account_id AND automations.status = 'active'"
-        )
-
-        automations = []
-        async for item in automations_container.query_items(
-            query=pause_query,
-            parameters=[{"name": "@account_id", "value": account_id}],
-        ):
-            automations.append(item)
-
-        # Update automations to paused
-        for automation in automations:
-            automation["status"] = "paused"
-            await automations_container.replace_item(
-                item=automation["id"],
-                body=automation,
-                partition_key=automation.get("user_id"),
-            )
-
-        # Step 2: Unsubscribe from webhooks
+        # Step 1: Unsubscribe from webhooks (best effort)
         page_id = account.get("page_id")
         access_token = account.get("access_token")
 
@@ -262,16 +246,79 @@ async def disconnect_account(
             except Exception as e:
                 logger.warning(f"Failed to unsubscribe from webhooks: {e}")
 
-        # Step 3: Soft delete account
-        account["status"] = "deleted"
-        await accounts_container.replace_item(
+        async def _delete_by_account_id(
+            container_name: str,
+            query: str,
+            parameters: list,
+            partition_key_field: str,
+        ) -> None:
+            container = await cosmos_client.get_async_container_client(container_name)
+            rows = []
+            async for item in container.query_items(
+                query=query,
+                parameters=parameters,
+            ):
+                rows.append(item)
+            for row in rows:
+                await container.delete_item(
+                    item=row["id"],
+                    partition_key=row.get(partition_key_field),
+                )
+
+        # Step 2: Hard-delete related docs
+        await _delete_by_account_id(
+            CONTAINER_AUTOMATIONS,
+            "SELECT c.id, c.user_id FROM c WHERE c.account_id = @account_id",
+            [{"name": "@account_id", "value": account_id}],
+            "user_id",
+        )
+        await _delete_by_account_id(
+            CONTAINER_CONTACTS,
+            "SELECT c.id, c.account_id FROM c WHERE c.account_id = @account_id",
+            [{"name": "@account_id", "value": account_id}],
+            "account_id",
+        )
+        await _delete_by_account_id(
+            CONTAINER_MESSAGE_LOGS,
+            "SELECT c.id, c.account_id FROM c WHERE c.account_id = @account_id",
+            [{"name": "@account_id", "value": account_id}],
+            "account_id",
+        )
+        await _delete_by_account_id(
+            CONTAINER_SCHEDULED_TASKS,
+            "SELECT c.id, c.account_id FROM c WHERE c.account_id = @account_id",
+            [{"name": "@account_id", "value": account_id}],
+            "account_id",
+        )
+        await _delete_by_account_id(
+            CONTAINER_ANALYTICS,
+            "SELECT c.id, c.account_id FROM c WHERE c.account_id = @account_id",
+            [{"name": "@account_id", "value": account_id}],
+            "account_id",
+        )
+        # Raw webhook rows can use either internal account_id or IG user id.
+        await _delete_by_account_id(
+            CONTAINER_WEBHOOK_EVENTS,
+            "SELECT c.id, c.account_id FROM c WHERE c.account_id = @account_id OR c.account_id = @ig_user_id",
+            [
+                {"name": "@account_id", "value": account_id},
+                {"name": "@ig_user_id", "value": account.get("ig_user_id")},
+            ],
+            "account_id",
+        )
+
+        # Step 3: Hard-delete account document
+        await accounts_container.delete_item(
             item=account_id,
-            body=account,
             partition_key=user_id,
         )
 
-        # Step 4: Clear Redis cache
-        await redis_client.delete(f"account:{account_id}")
+        # Step 4: Clear Redis cache (best-effort; don't fail disconnect if Redis is down)
+        try:
+            await redis_client.delete(f"account:{account_id}")
+            await redis_client.delete(f"account_map:{account.get('ig_user_id')}")
+        except Exception as e:
+            logger.warning(f"Failed to clear Redis cache for account {account_id}: {e}")
 
         return None  # 204 No Content
 

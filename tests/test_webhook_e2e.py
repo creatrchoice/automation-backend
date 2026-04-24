@@ -9,6 +9,12 @@ Usage:
 
 Run this on your VM where the backend is running locally.
 """
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Manual E2E script for live environment validation; excluded from CI."
+)
+
 import hashlib
 import hmac
 import json

@@ -9,6 +9,12 @@ Usage:
 Requirements:
     pip install httpx
 """
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Manual live integration script; excluded from automated CI tests."
+)
+
 import hashlib
 import hmac
 import json
