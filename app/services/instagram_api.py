@@ -7,6 +7,7 @@ from datetime import datetime
 
 from app.core.config import dm_settings
 from app.services.token_manager import TokenManager
+from app.core.security import SecurityError
 from app.services.rate_limiter import RateLimiter
 from app.db.redis import redis_client
 
@@ -96,7 +97,15 @@ class InstagramAPI:
             if not encrypted:
                 logger.error(f"No access token found for account {account_id}")
                 raise ValueError(f"No access token for account {account_id}")
-            access_token = self.token_manager.decrypt_token(encrypted)
+            try:
+                access_token = self.token_manager.decrypt_token(encrypted)
+            except SecurityError:
+                # Backward compatibility: some account docs still store plaintext tokens.
+                logger.warning(
+                    "Access token for account %s is not encrypted; using plaintext fallback.",
+                    account_id,
+                )
+                access_token = encrypted
             graph_user_id = self.token_manager.graph_user_id_from_document(
                 account, account_id
             )
@@ -208,7 +217,7 @@ class InstagramAPI:
 
         request = {
             "recipient": recipient,
-            "messaging_type": "MESSAGE_TYPE_RESPONSE"
+            "messaging_type": "RESPONSE"
         }
 
         if payload_type == "text":

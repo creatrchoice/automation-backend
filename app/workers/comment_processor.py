@@ -170,7 +170,7 @@ class CommentProcessor:
 
             # Query Cosmos DB for account mapping
             container = cosmos_db.get_container_client(CONTAINER_IG_ACCOUNTS)
-            query = "SELECT TOP 1 c.account_id FROM c WHERE c.ig_user_id = @ig_user_id"
+            query = "SELECT TOP 1 c.id, c.account_id FROM c WHERE c.ig_user_id = @ig_user_id"
             results = list(
                 container.query_items(
                     query=query,
@@ -183,7 +183,8 @@ class CommentProcessor:
                 logger.warning(f"No account found for Instagram user {ig_user_id}")
                 return None
 
-            account_id = results[0].get("account_id")
+            row = results[0]
+            account_id = row.get("account_id") or row.get("id")
 
             # Cache the mapping (best-effort).
             try:
@@ -220,27 +221,46 @@ class CommentProcessor:
         try:
             container = cosmos_db.get_container_client(self.automations_container)
 
-            # Query for active automations with comment trigger
+            # Query active, non-deleted automations for this account.
+            # Trigger-specific filtering is done in Python to support
+            # current schema (trigger object) and legacy variants.
             query = (
                 "SELECT c.* FROM c "
                 "WHERE c.account_id = @account_id "
-                "AND c.status = 'active' "
-                "AND ARRAY_CONTAINS(c.triggers, @trigger_type)"
+                "AND c.enabled = true"
             )
 
-            results = list(
-                container.query_items(
-                    query=query,
-                    parameters=[
-                        {"name": "@account_id", "value": account_id},
-                        {"name": "@trigger_type", "value": trigger_type},
-                    ],
+            try:
+                results = list(
+                    container.query_items(
+                        query=query,
+                        parameters=[
+                            {"name": "@account_id", "value": account_id},
+                        ],
+                        enable_cross_partition_query=True,
+                    )
                 )
-            )
+            except Exception as query_err:
+                # Some environments intermittently return a generic BadRequest for the
+                # parameterized query; fall back to a broad fetch and filter in Python.
+                logger.warning(
+                    "Primary automation query failed for account %s, using fallback scan: %s",
+                    account_id,
+                    query_err,
+                )
+                fallback_rows = list(
+                    container.query_items(
+                        query="SELECT * FROM c WHERE c.enabled = true",
+                        enable_cross_partition_query=True,
+                    )
+                )
+                results = [a for a in fallback_rows if str(a.get("account_id")) == str(account_id)]
 
             # Filter automations based on conditions
             matching = []
             for automation in results:
+                if not self._is_matching_comment_trigger(automation, trigger_type, context):
+                    continue
                 if self._matches_automation_conditions(automation, context):
                     matching.append(automation)
 
@@ -249,6 +269,76 @@ class CommentProcessor:
         except Exception as e:
             logger.error(f"Error matching automations: {str(e)}")
             return []
+
+    def _canonical_trigger_type(self, raw: Any) -> str:
+        """Map trigger type variants to canonical values."""
+        if raw is None:
+            return ""
+        t = str(raw).strip().lower()
+        if t in ("comment", "comments"):
+            return "comment"
+        if t in ("message", "message_received", "dm", "dm_keyword", "messages"):
+            return "message"
+        return t
+
+    def _normalize_keyword(self, keyword: Any) -> Dict[str, Any]:
+        """Normalize keyword entries stored as plain strings or objects."""
+        if isinstance(keyword, dict):
+            return keyword
+        if isinstance(keyword, str):
+            return {"value": keyword, "match_type": "contains", "case_sensitive": False}
+        return {"value": str(keyword), "match_type": "contains", "case_sensitive": False}
+
+    def _match_keywords(self, text: str, keywords: List[Any]) -> bool:
+        """Evaluate text against exact/contains/regex keyword rules."""
+        if not keywords:
+            return True
+
+        for kw in keywords:
+            rule = self._normalize_keyword(kw)
+            match_type = str(rule.get("match_type", "contains")).lower()
+            value = str(rule.get("value", ""))
+            case_sensitive = bool(rule.get("case_sensitive", False))
+
+            compare_text = text if case_sensitive else text.lower()
+            compare_value = value if case_sensitive else value.lower()
+
+            try:
+                if match_type == "exact" and compare_text == compare_value:
+                    return True
+                if match_type == "contains" and compare_value in compare_text:
+                    return True
+                if match_type == "regex":
+                    import re
+                    flags = 0 if case_sensitive else re.IGNORECASE
+                    if re.search(compare_value, text, flags):
+                        return True
+            except Exception as e:
+                logger.warning(f"Invalid keyword rule skipped {rule}: {e}")
+                continue
+
+        return False
+
+    def _is_matching_comment_trigger(
+        self, automation: Dict[str, Any], trigger_type: str, context: Dict[str, Any]
+    ) -> bool:
+        """Check trigger type, post/media filters, and keyword rules."""
+        trigger = automation.get("trigger", {}) or {}
+        if self._canonical_trigger_type(trigger.get("type")) != self._canonical_trigger_type(trigger_type):
+            return False
+
+        media_id = str(context.get("media_id") or "")
+
+        post_id = trigger.get("post_id")
+        if post_id and media_id and str(post_id) != media_id:
+            return False
+
+        media_ids = trigger.get("media_ids") or []
+        if media_ids and media_id and media_id not in {str(x) for x in media_ids}:
+            return False
+
+        comment_text = context.get("comment_text", "") or ""
+        return self._match_keywords(comment_text, trigger.get("keywords", []) or [])
 
     def _matches_automation_conditions(
         self, automation: Dict[str, Any], context: Dict[str, Any]

@@ -397,7 +397,6 @@ async def update_automation(
         await automations_container.replace_item(
             item=automation_id,
             body=automation,
-            partition_key=user_id,
         )
 
         return automation
@@ -477,7 +476,6 @@ async def update_automation_status(
         await automations_container.replace_item(
             item=automation_id,
             body=automation,
-            partition_key=user_id,
         )
 
         return automation
