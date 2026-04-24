@@ -15,7 +15,7 @@ class DMAutomationSettings(BaseSettings):
         description="OAuth redirect URI registered in Meta Developer Dashboard"
     )
     INSTAGRAM_BUSINESS_ACCOUNT_ID: str = Field(default="", description="Default Instagram Business Account ID")
-    INSTAGRAM_API_VERSION: str = Field(default="v21.0", description="Instagram Graph API version")
+    INSTAGRAM_API_VERSION: str = Field(default="v25.0", description="Instagram Graph API version")
     INSTAGRAM_API_BASE_URL: str = Field(
         default="https://graph.instagram.com",
         description="Instagram Graph API base URL"
@@ -53,14 +53,14 @@ class DMAutomationSettings(BaseSettings):
     DM_DATABASE_NAME: str = Field(default="dm_automation_db", description="Cosmos DB database name")
 
     # Cosmos DB Container Names
-    DM_USERS_CONTAINER: str = Field(default="users", description="Users container")
-    DM_IG_ACCOUNTS_CONTAINER: str = Field(default="instagram_accounts", description="Instagram accounts container")
-    DM_AUTOMATIONS_CONTAINER: str = Field(default="automations", description="Automations container")
-    DM_CONTACTS_CONTAINER: str = Field(default="contacts", description="Contacts container")
-    DM_MESSAGE_LOGS_CONTAINER: str = Field(default="message_logs", description="Message logs container")
-    DM_WEBHOOK_EVENTS_CONTAINER: str = Field(default="webhook_events", description="Webhook events container")
-    DM_SCHEDULED_TASKS_CONTAINER: str = Field(default="scheduled_tasks", description="Scheduled tasks container")
-    DM_ANALYTICS_CONTAINER: str = Field(default="analytics_daily", description="Analytics container")
+    DM_USERS_CONTAINER: str = Field(default="dm_users", description="Users container")
+    DM_IG_ACCOUNTS_CONTAINER: str = Field(default="dm_ig_accounts", description="Instagram accounts container")
+    DM_AUTOMATIONS_CONTAINER: str = Field(default="dm_automations", description="Automations container")
+    DM_CONTACTS_CONTAINER: str = Field(default="dm_contacts", description="Contacts container")
+    DM_MESSAGE_LOGS_CONTAINER: str = Field(default="dm_message_logs", description="Message logs container")
+    DM_WEBHOOK_EVENTS_CONTAINER: str = Field(default="dm_webhook_events", description="Webhook events container")
+    DM_SCHEDULED_TASKS_CONTAINER: str = Field(default="dm_scheduled_tasks", description="Scheduled tasks container")
+    DM_ANALYTICS_CONTAINER: str = Field(default="dm_analytics", description="Analytics container")
 
     # ===== Redis =====
     REDIS_HOST: str = Field(default="localhost", description="Redis host")

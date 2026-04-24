@@ -21,6 +21,11 @@ import os
 import re
 import sys
 import base64
+from app.workers.processor_utils import (
+    canonical_trigger_type,
+    match_keywords,
+    normalize_keyword_rule,
+)
 
 try:
     import httpx
@@ -167,69 +172,13 @@ def encode_postback_payload(automation_id: str, action: str = "button_click", me
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  KEYWORD MATCHER  (mirrors AutomationEngine._match_keywords)
+#  KEYWORD MATCHER (uses shared worker utility)
 # ═══════════════════════════════════════════════════════════════════
-
-def _normalize_keyword(k) -> dict:
-    """Cosmos may store keywords as strings or full dicts."""
-    if isinstance(k, dict):
-        return k
-    if isinstance(k, str):
-        return {"value": k, "match_type": "contains", "case_sensitive": False}
-    return {"value": str(k), "match_type": "contains", "case_sensitive": False}
 
 
 def _format_keyword_for_display(k) -> str:
-    nk = _normalize_keyword(k)
+    nk = normalize_keyword_rule(k)
     return f'"{nk.get("value", "")}" ({nk.get("match_type", "contains")})'
-
-
-def match_keywords(text: str, keywords: list) -> bool:
-    """
-    Check if text matches any keyword definition.
-
-    Keyword format: {"match_type": "exact|contains|regex", "value": "...", "case_sensitive": false}
-    Or a plain string (treated as contains match).
-    Empty keywords list = match all (catch-all automation).
-    """
-    if not keywords:
-        return True  # No keywords = match all
-
-    for kw in keywords:
-        kw = _normalize_keyword(kw)
-        match_type = kw.get("match_type", "contains").lower()
-        value = kw.get("value", "")
-        case_sensitive = kw.get("case_sensitive", False)
-
-        compare_text = text if case_sensitive else text.lower()
-        compare_value = value if case_sensitive else value.lower()
-
-        try:
-            if match_type == "exact" and compare_text == compare_value:
-                return True
-            elif match_type == "contains" and compare_value in compare_text:
-                return True
-            elif match_type == "regex":
-                flags = 0 if case_sensitive else re.IGNORECASE
-                if re.search(compare_value, compare_text, flags):
-                    return True
-        except Exception as e:
-            print(f"  ⚠️  Keyword match error: {e}")
-            continue
-
-    return False
-
-
-def canonical_trigger_type(raw) -> str:
-    """Map DB/UI values to 'comment' | 'message' for comparison with webhook-derived types."""
-    if raw is None:
-        return ""
-    t = str(raw).strip().lower()
-    if t in ("comment", "comments"):
-        return "comment"
-    if t in ("message", "message_received", "dm", "dm_keyword", "messages"):
-        return "message"
-    return t
 
 
 def coerce_message_template(tpl) -> dict:

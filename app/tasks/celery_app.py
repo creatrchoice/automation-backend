@@ -10,9 +10,11 @@ logger = logging.getLogger(__name__)
 setup_logging()
 
 # Create Celery app
+# NOTE: Celery fallback for webhooks uses Redis as broker. Azure Service Bus is
+# handled directly in app/api/webhooks.py and is not a Celery transport URL.
 celery_app = Celery(
     main="dm_automation",
-    broker=dm_settings.AZURE_SERVICE_BUS_CONNECTION_STRING or "redis{ssl}://{user}:{pwd}@{host}:{port}/0".format(
+    broker="redis{ssl}://{user}:{pwd}@{host}:{port}/0".format(
         ssl="s" if dm_settings.REDIS_SSL else "",
         user=dm_settings.REDIS_USERNAME or "",
         pwd=dm_settings.REDIS_PASSWORD or "",

@@ -2,9 +2,17 @@
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from app.core.config import dm_settings
 from app.db.cosmos_db import cosmos_db
-from app.db.redis import redis_client
+from app.db.cosmos_containers import (
+    CONTAINER_CONTACTS,
+    CONTAINER_MESSAGE_LOGS,
+)
+from app.db.repositories.automation_repository import (
+    list_all_enabled_automations,
+    list_enabled_automations_for_account,
+)
+from app.services.automation_matcher import matches_comment_trigger
+from app.workers.processor_utils import resolve_account_id_with_cache
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +22,8 @@ class CommentProcessor:
 
     def __init__(self):
         """Initialize comment processor."""
-        self.automations_container = dm_settings.DM_AUTOMATIONS_CONTAINER
-        self.contacts_container = dm_settings.DM_CONTACTS_CONTAINER
-        self.message_logs_container = dm_settings.DM_MESSAGE_LOGS_CONTAINER
-        self.automation_cache_ttl = dm_settings.AUTOMATION_CACHE_TTL_HOURS * 3600
+        self.contacts_container = CONTAINER_CONTACTS
+        self.message_logs_container = CONTAINER_MESSAGE_LOGS
 
     def process_comment_webhook(self, event: Dict[str, Any]) -> None:
         """
@@ -147,37 +153,9 @@ class CommentProcessor:
             Account ID or None
         """
         try:
-            cache_key = f"account_map:{ig_user_id}"
-
-            # Try cache first
-            cached_account_id = redis_client.get(cache_key)
-            if cached_account_id:
-                logger.debug(f"Found account mapping in cache for {ig_user_id}")
-                return cached_account_id
-
-            # Query Cosmos DB for account mapping
-            container = cosmos_db.get_container_client(
-                dm_settings.DM_IG_ACCOUNTS_CONTAINER
-            )
-            query = "SELECT c.account_id FROM c WHERE c.ig_user_id = @ig_user_id LIMIT 1"
-            results = list(
-                container.query_items(
-                    query=query,
-                    parameters=[{"name": "@ig_user_id", "value": ig_user_id}],
-                )
-            )
-
-            if not results:
-                logger.warning(f"No account found for Instagram user {ig_user_id}")
-                return None
-
-            account_id = results[0].get("account_id")
-
-            # Cache the mapping
-            cache_ttl = dm_settings.ACCOUNT_MAP_CACHE_TTL_HOURS * 3600
-            redis_client.setex(cache_key, cache_ttl, account_id)
-
-            logger.debug(f"Resolved account {account_id} for Instagram user {ig_user_id}")
+            account_id = resolve_account_id_with_cache(ig_user_id, logger)
+            if account_id:
+                logger.debug(f"Resolved account {account_id} for Instagram user {ig_user_id}")
             return account_id
 
         except Exception as e:
@@ -199,29 +177,22 @@ class CommentProcessor:
             List of matching automation configurations
         """
         try:
-            container = cosmos_db.get_container_client(self.automations_container)
-
-            # Query for active automations with comment trigger
-            query = (
-                "SELECT c.* FROM c "
-                "WHERE c.account_id = @account_id "
-                "AND c.status = 'active' "
-                "AND ARRAY_CONTAINS(c.triggers, @trigger_type)"
-            )
-
-            results = list(
-                container.query_items(
-                    query=query,
-                    parameters=[
-                        {"name": "@account_id", "value": account_id},
-                        {"name": "@trigger_type", "value": trigger_type},
-                    ],
+            try:
+                results = list_enabled_automations_for_account(account_id)
+            except Exception as query_err:
+                logger.warning(
+                    "Primary automation query failed for account %s, using fallback scan: %s",
+                    account_id,
+                    query_err,
                 )
-            )
+                fallback_rows = list_all_enabled_automations()
+                results = [a for a in fallback_rows if str(a.get("account_id")) == str(account_id)]
 
             # Filter automations based on conditions
             matching = []
             for automation in results:
+                if not self._is_matching_comment_trigger(automation, trigger_type, context):
+                    continue
                 if self._matches_automation_conditions(automation, context):
                     matching.append(automation)
 
@@ -230,6 +201,12 @@ class CommentProcessor:
         except Exception as e:
             logger.error(f"Error matching automations: {str(e)}")
             return []
+
+    def _is_matching_comment_trigger(
+        self, automation: Dict[str, Any], trigger_type: str, context: Dict[str, Any]
+    ) -> bool:
+        """Check trigger type, post/media filters, and keyword rules."""
+        return matches_comment_trigger(automation, trigger_type, context)
 
     def _matches_automation_conditions(
         self, automation: Dict[str, Any], context: Dict[str, Any]

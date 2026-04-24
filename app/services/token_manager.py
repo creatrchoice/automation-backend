@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 from app.core.security import TokenEncryption, SecurityError
 from app.core.config import dm_settings
 from app.db.cosmos_db import CosmosDBClient
+from app.db.cosmos_containers import CONTAINER_IG_ACCOUNTS
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -76,13 +77,14 @@ class TokenManager:
         """
         logger.debug(f"Loading account {account_id} from Cosmos DB")
         container = self.cosmos_client.get_container_client(
-            dm_settings.DM_IG_ACCOUNTS_CONTAINER
+            CONTAINER_IG_ACCOUNTS
         )
         query = "SELECT * FROM c WHERE c.id = @account_id"
         items = list(
             container.query_items(
                 query=query,
                 parameters=[{"name": "@account_id", "value": account_id}],
+                enable_cross_partition_query=True,
             )
         )
         if not items:
@@ -165,7 +167,7 @@ class TokenManager:
                 return False
 
             container = self.cosmos_client.get_container_client(
-                dm_settings.DM_IG_ACCOUNTS_CONTAINER
+                CONTAINER_IG_ACCOUNTS
             )
             current_token = self.decrypt_token(account["access_token"])
 
