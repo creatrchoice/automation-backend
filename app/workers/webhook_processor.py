@@ -2,6 +2,7 @@
 import logging
 import json
 import time
+import hashlib
 from typing import Dict, Any, Optional
 from enum import Enum
 from datetime import datetime, timedelta
@@ -65,7 +66,7 @@ class WebhookProcessor:
         """
         try:
             event_type = self._determine_event_type(event)
-            webhook_id = event.get("id", "unknown")
+            webhook_id = self._event_dedup_id(event)
 
             logger.info(f"Processing webhook event: {webhook_id} of type: {event_type}")
 
@@ -216,6 +217,24 @@ class WebhookProcessor:
             )
             return False
 
+    def _event_dedup_id(self, event: Dict[str, Any]) -> str:
+        """
+        Build a stable dedup identifier for events without a provider event id.
+
+        If upstream sends no id (common for changes/comment events), use a hash of
+        normalized payload so replaying the same event does not trigger duplicate sends.
+        """
+        event_id = str(event.get("id") or "").strip()
+        if event_id and event_id != "unknown":
+            return event_id
+
+        try:
+            normalized = json.dumps(event, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            normalized = str(event)
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+        return f"hash_{digest}"
+
     def _store_webhook_event(
         self, event: Dict[str, Any], event_type: WebhookEventType
     ) -> None:
@@ -245,8 +264,23 @@ class WebhookProcessor:
                 "status": "processed",
             }
 
-            container.create_item(webhook_record)
-            logger.debug(f"Stored webhook event: {webhook_record['id']}")
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    container.create_item(webhook_record)
+                    logger.debug(f"Stored webhook event: {webhook_record['id']}")
+                    return
+                except OSError as os_err:
+                    if attempt == max_attempts:
+                        raise
+                    logger.warning(
+                        "Transient OS error storing webhook event %s (attempt %s/%s): %s",
+                        webhook_record["id"],
+                        attempt,
+                        max_attempts,
+                        os_err,
+                    )
+                    time.sleep(0.5 * attempt)
         except Exception as e:
             logger.error(f"Failed to store webhook event: {str(e)}")
 

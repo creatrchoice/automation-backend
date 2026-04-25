@@ -1,12 +1,15 @@
 """On-deliver action executor for automation step completion."""
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 from app.core.config import dm_settings
 from app.db.cosmos_db import cosmos_db
 from app.db.redis import redis_client
 
 logger = logging.getLogger(__name__)
+
+# Deduplicate public comment replies (e.g. when webhook is processed inline + from queue)
+_PUBLIC_COMMENT_REPLY_DEDUP_TTL_SECONDS = 6 * 3600
 
 
 class ActionExecutor:
@@ -18,18 +21,23 @@ class ActionExecutor:
         self.scheduled_tasks_container = dm_settings.DM_SCHEDULED_TASKS_CONTAINER
 
     def execute_on_deliver_action(
-        self, action: Dict[str, Any], account_id: str, contact_ig_id: str
+        self,
+        action: Dict[str, Any],
+        account_id: str,
+        contact_ig_id: str,
+        context: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Execute an on-deliver action.
 
         Handles: add_tag, remove_tag, enable_human_handoff, trigger_automation,
-        schedule_message, recheck_follow_status
+        schedule_message, recheck_follow_status, reply_to_instagram_comment
 
         Args:
             action: Action configuration
             account_id: Account ID
             contact_ig_id: Contact Instagram ID
+            context: Optional webhook context (e.g. comment_id for public replies)
         """
         try:
             action_type = action.get("type")
@@ -52,6 +60,11 @@ class ActionExecutor:
 
             elif action_type == "recheck_follow_status":
                 self.execute_recheck_follow_status(action, account_id, contact_ig_id)
+
+            elif action_type == "reply_to_instagram_comment":
+                self.execute_reply_to_instagram_comment(
+                    action, account_id, contact_ig_id, context
+                )
 
             else:
                 logger.warning(f"Unknown action type: {action_type}")
@@ -356,6 +369,69 @@ class ActionExecutor:
         except Exception as e:
             logger.error(f"Error rechecking follow status: {str(e)}")
 
+    def execute_reply_to_instagram_comment(
+        self,
+        action: Dict[str, Any],
+        account_id: str,
+        contact_ig_id: str,
+        context: Optional[Dict[str, Any]],
+    ) -> None:
+        """
+        Post a public reply to the user's comment (after a successful private DM).
+        Requires context['comment_id'] from comment webhooks.
+        """
+        if action.get("only_if_send_succeeded") is False:
+            # Call sites only invoke after a successful send; keep flag for future use
+            pass
+
+        if not context or not context.get("comment_id"):
+            logger.warning(
+                "reply_to_instagram_comment: missing context.comment_id; skipping"
+            )
+            return
+
+        text = (action.get("message") or "").strip()
+        if not text:
+            logger.warning("reply_to_instagram_comment: missing 'message' in action")
+            return
+
+        comment_id = str(context["comment_id"])
+        dedup_key = f"ig:public_comment_reply:{comment_id}"
+
+        try:
+            was_set = redis_client.set(
+                dedup_key,
+                "1",
+                ex=_PUBLIC_COMMENT_REPLY_DEDUP_TTL_SECONDS,
+                nx=True,
+            )
+            # redis-py: True if set, None/False if key already existed
+            if not was_set:
+                logger.info(
+                    "Skipping duplicate public comment reply (already sent) for %s",
+                    comment_id,
+                )
+                return
+        except Exception as redis_err:
+            logger.warning(
+                "Redis idempotency unavailable for public reply (%s): %s; proceeding",
+                comment_id,
+                redis_err,
+            )
+
+        try:
+            from app.services.instagram_api import instagram_api
+
+            instagram_api.reply_to_instagram_comment_sync(
+                account_id, comment_id, text
+            )
+        except Exception as e:
+            logger.error(
+                "Failed public comment reply for comment_id=%s: %s",
+                comment_id,
+                e,
+            )
+
     def _send_websocket_notification(
         self,
         account_id: str,
@@ -397,7 +473,10 @@ action_executor = ActionExecutor()
 
 
 def execute_on_deliver_action(
-    action: Dict[str, Any], account_id: str, contact_ig_id: str
+    action: Dict[str, Any],
+    account_id: str,
+    contact_ig_id: str,
+    context: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Execute an on-deliver action.
@@ -406,5 +485,8 @@ def execute_on_deliver_action(
         action: Action configuration
         account_id: Account ID
         contact_ig_id: Contact Instagram ID
+        context: Optional event context (e.g. comment_id)
     """
-    action_executor.execute_on_deliver_action(action, account_id, contact_ig_id)
+    action_executor.execute_on_deliver_action(
+        action, account_id, contact_ig_id, context
+    )

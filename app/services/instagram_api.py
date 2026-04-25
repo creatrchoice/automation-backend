@@ -1,6 +1,7 @@
 """Instagram Graph API service for DM automation."""
 import asyncio
 import logging
+import threading
 from typing import Dict, Any, Optional, List
 import httpx
 from datetime import datetime
@@ -54,6 +55,29 @@ class InstagramAPI:
         self.api_base_url = dm_settings.INSTAGRAM_API_BASE_URL
         self.api_version = dm_settings.INSTAGRAM_API_VERSION
 
+    @staticmethod
+    def _looks_like_encrypted_token(token: str) -> bool:
+        """Heuristic for Fernet-style encrypted tokens."""
+        return isinstance(token, str) and token.startswith("gAAAA")
+
+    def _get_account_access_token(
+        self, account_id: str, account: Dict[str, Any]
+    ) -> str:
+        """Return decrypted token when encrypted, else plaintext fallback."""
+        raw_token = account.get("access_token")
+        if not raw_token:
+            logger.error(f"No access token found for account {account_id}")
+            raise ValueError(f"No access token for account {account_id}")
+
+        if not self._looks_like_encrypted_token(raw_token):
+            logger.warning(
+                "Access token for account %s is not encrypted; using plaintext fallback.",
+                account_id,
+            )
+            return raw_token
+
+        return self.token_manager.decrypt_token(raw_token)
+
     async def send_dm(
         self,
         account_id: str,
@@ -93,19 +117,7 @@ class InstagramAPI:
             logger.info(f"Sending DM to {recipient_id} from account {account_id}")
 
             account = self.token_manager.get_account_document(account_id)
-            encrypted = account.get("access_token")
-            if not encrypted:
-                logger.error(f"No access token found for account {account_id}")
-                raise ValueError(f"No access token for account {account_id}")
-            try:
-                access_token = self.token_manager.decrypt_token(encrypted)
-            except SecurityError:
-                # Backward compatibility: some account docs still store plaintext tokens.
-                logger.warning(
-                    "Access token for account %s is not encrypted; using plaintext fallback.",
-                    account_id,
-                )
-                access_token = encrypted
+            access_token = self._get_account_access_token(account_id, account)
             graph_user_id = self.token_manager.graph_user_id_from_document(
                 account, account_id
             )
@@ -123,47 +135,62 @@ class InstagramAPI:
                 recipient_id, message_payload, comment_id=comment_id
             )
 
-            # Make API call
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    url,
-                    json=request_body,
-                    params={"access_token": access_token}
+            # Make API call with retries for transient 5xx failures.
+            max_attempts = 3
+            response = None
+            for attempt in range(1, max_attempts + 1):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        url,
+                        json=request_body,
+                        params={"access_token": access_token}
+                    )
+                if response.status_code < 500 or attempt == max_attempts:
+                    break
+                wait_seconds = attempt
+                logger.warning(
+                    "Instagram API transient error for %s (status=%s, attempt=%s/%s), retrying in %ss",
+                    account_id,
+                    response.status_code,
+                    attempt,
+                    max_attempts,
+                    wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+
+            # Handle different response codes
+            if response.status_code == 429:
+                logger.error(f"Rate limit hit from Instagram API for account {account_id}")
+                raise RateLimitExceeded("Instagram API rate limit exceeded")
+
+            if response.status_code == 401:
+                logger.error(f"Unauthorized - token expired for account {account_id}")
+                raise TokenExpired(f"Access token expired for account {account_id}")
+
+            if response.status_code not in (200, 201):
+                error_text = response.text
+                logger.error(
+                    f"Instagram API error for {account_id}: "
+                    f"status={response.status_code}, response={error_text}"
+                )
+                raise InstagramAPIError(
+                    f"Instagram API returned {response.status_code}: {error_text}"
                 )
 
-                # Handle different response codes
-                if response.status_code == 429:
-                    logger.error(f"Rate limit hit from Instagram API for account {account_id}")
-                    raise RateLimitExceeded("Instagram API rate limit exceeded")
+            result = response.json()
+            message_id = result.get("message_id")
 
-                if response.status_code == 401:
-                    logger.error(f"Unauthorized - token expired for account {account_id}")
-                    raise TokenExpired(f"Access token expired for account {account_id}")
+            logger.info(f"Message sent successfully - id={message_id}, recipient={recipient_id}")
 
-                if response.status_code not in (200, 201):
-                    error_text = response.text
-                    logger.error(
-                        f"Instagram API error for {account_id}: "
-                        f"status={response.status_code}, response={error_text}"
-                    )
-                    raise InstagramAPIError(
-                        f"Instagram API returned {response.status_code}: {error_text}"
-                    )
+            # Record in rate limiter after successful send
+            self.rate_limiter.record_send(account_id)
 
-                result = response.json()
-                message_id = result.get("message_id")
-
-                logger.info(f"Message sent successfully - id={message_id}, recipient={recipient_id}")
-
-                # Record in rate limiter after successful send
-                self.rate_limiter.record_send(account_id)
-
-                return {
-                    "success": True,
-                    "message_id": message_id,
-                    "recipient_id": recipient_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
+            return {
+                "success": True,
+                "message_id": message_id,
+                "recipient_id": recipient_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
 
         except (RateLimitExceeded, TokenExpired, InstagramAPIError):
             raise
@@ -181,16 +208,149 @@ class InstagramAPI:
         """
         Run async send_dm from synchronous worker code (webhooks, Celery).
 
-        Uses asyncio.run(); do not call from inside a running event loop.
+        If called while an event loop is already running (e.g. inside FastAPI
+        request handling), run the coroutine in a dedicated thread to avoid
+        nested-event-loop errors.
         """
-        return asyncio.run(
-            self.send_dm(
-                account_id,
-                recipient_id,
-                message_payload,
-                comment_id=comment_id,
-            )
+        coroutine = self.send_dm(
+            account_id,
+            recipient_id,
+            message_payload,
+            comment_id=comment_id,
         )
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # Normal sync context with no active event loop.
+            return asyncio.run(coroutine)
+
+        result_holder: Dict[str, Any] = {}
+        error_holder: Dict[str, BaseException] = {}
+
+        def _runner() -> None:
+            try:
+                result_holder["value"] = asyncio.run(coroutine)
+            except BaseException as exc:
+                error_holder["error"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "error" in error_holder:
+            raise error_holder["error"]
+
+        return result_holder.get("value", {})
+
+    async def reply_to_instagram_comment(
+        self,
+        account_id: str,
+        comment_id: str,
+        message: str,
+    ) -> Dict[str, Any]:
+        """
+        Post a public reply under an existing Instagram comment.
+
+        See Meta: POST /{ig-comment-id}/replies?message=...
+
+        Args:
+            account_id: Internal or IG-linked account id (for token lookup)
+            comment_id: Instagram comment id to reply to
+            message: Public reply text
+
+        Returns:
+            API JSON (typically includes id of the new reply)
+        """
+        if not (comment_id and message and str(message).strip()):
+            raise ValueError("comment_id and non-empty message are required")
+
+        try:
+            logger.info(
+                "Posting public reply to comment %s for account %s",
+                comment_id,
+                account_id,
+            )
+            account = self.token_manager.get_account_document(account_id)
+            access_token = self._get_account_access_token(account_id, account)
+
+            url = f"{self.api_base_url}/{self.api_version}/{comment_id}/replies"
+            text = str(message).strip()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    url,
+                    params={
+                        "message": text,
+                        "access_token": access_token,
+                    },
+                )
+
+            if response.status_code == 401:
+                raise TokenExpired(f"Access token expired for account {account_id}")
+            if response.status_code not in (200, 201):
+                error_text = response.text
+                logger.error(
+                    "Instagram comment reply error for %s: status=%s body=%s",
+                    account_id,
+                    response.status_code,
+                    error_text,
+                )
+                raise InstagramAPIError(
+                    f"Instagram API returned {response.status_code}: {error_text}"
+                )
+
+            result = response.json()
+            new_id = result.get("id")
+            logger.info(
+                "Public comment reply posted: comment_id=%s reply_id=%s",
+                comment_id,
+                new_id,
+            )
+            return {
+                "success": True,
+                "id": new_id,
+                "comment_id": comment_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
+        except (TokenExpired, InstagramAPIError):
+            raise
+        except Exception as e:
+            logger.error("Error replying to Instagram comment: %s", e)
+            raise InstagramAPIError(f"Failed to reply to comment: {e}") from e
+
+    def reply_to_instagram_comment_sync(
+        self,
+        account_id: str,
+        comment_id: str,
+        message: str,
+    ) -> Dict[str, Any]:
+        """Sync wrapper; safe when called from a running asyncio event loop."""
+        coroutine = self.reply_to_instagram_comment(
+            account_id, comment_id, message
+        )
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coroutine)
+
+        result_holder: Dict[str, Any] = {}
+        error_holder: Dict[str, BaseException] = {}
+
+        def _runner() -> None:
+            try:
+                result_holder["value"] = asyncio.run(coroutine)
+            except BaseException as exc:
+                error_holder["error"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "error" in error_holder:
+            raise error_holder["error"]
+
+        return result_holder.get("value", {})
 
     def _build_send_message_request(
         self,

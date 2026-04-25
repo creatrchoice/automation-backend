@@ -210,7 +210,11 @@ class AutomationStep(BaseModel):
     # Actions on delivery
     on_deliver_actions: List[OnDeliverAction] = Field(
         default_factory=list,
-        description="Actions when message is delivered"
+        description=(
+            "Actions when message is delivered. At runtime, Cosmos may store "
+            "flexible dicts with a `type` field, including `reply_to_instagram_comment` "
+            "for a public comment reply (after DM) when comment_id is in context."
+        ),
     )
 
     # Follow-up configuration

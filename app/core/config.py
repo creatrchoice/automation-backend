@@ -126,6 +126,14 @@ class DMAutomationSettings(BaseSettings):
     ENABLE_HUMAN_HANDOFF: bool = Field(default=True, description="Enable human handoff feature")
     ENABLE_CONTACT_ENRICHMENT: bool = Field(default=False, description="Enable contact enrichment")
     ENABLE_AI_MESSAGE_GENERATION: bool = Field(default=False, description="Enable AI message generation")
+    ENABLE_WEBHOOK_QUEUE_SERVICE: bool = Field(
+        default=False,
+        description="Enable queue-based webhook dispatch to Service Bus"
+    )
+    ENABLE_WEBHOOK_INLINE_FALLBACK_ON_RECEIVE: bool = Field(
+        default=True,
+        description="Process webhook inline at receive-time (can run in addition to queue)"
+    )
 
     @property
     def cors_origins_list(self) -> List[str]:

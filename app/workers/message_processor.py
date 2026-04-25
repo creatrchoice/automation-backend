@@ -12,6 +12,7 @@ from app.db.cosmos_containers import (
 from app.db.repositories.automation_repository import list_enabled_automations_for_account
 from app.services.automation_matcher import effective_automation_type, matches_message_context
 from app.workers.processor_utils import resolve_account_id_with_cache
+from app.workers.step_delivery import run_step_on_deliver_actions
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +237,10 @@ class MessageProcessor:
             container = cosmos_db.get_container_client(self.contacts_container)
 
             # Query contact
-            query = "SELECT c.id FROM c WHERE c.id = @contact_id AND c.account_id = @account_id LIMIT 1"
+            query = (
+                "SELECT TOP 1 * FROM c "
+                "WHERE c.id = @contact_id AND c.account_id = @account_id"
+            )
             results = list(
                 container.query_items(
                     query=query,
@@ -244,6 +248,7 @@ class MessageProcessor:
                         {"name": "@contact_id", "value": contact_id},
                         {"name": "@account_id", "value": account_id},
                     ],
+                    partition_key=account_id,
                 )
             )
 
@@ -422,6 +427,9 @@ class MessageProcessor:
                 self._log_message_delivery(
                     account_id, contact_id, step.get("id"), message, "sent"
                 )
+                run_step_on_deliver_actions(
+                    account_id, contact_id, step, context
+                )
 
         except Exception as e:
             logger.exception(f"Error executing step: {str(e)}")
@@ -444,8 +452,8 @@ class MessageProcessor:
 
             # Query contact to check if automation is active
             query = (
-                "SELECT c.* FROM c "
-                "WHERE c.id = @contact_id AND c.account_id = @account_id LIMIT 1"
+                "SELECT TOP 1 * FROM c "
+                "WHERE c.id = @contact_id AND c.account_id = @account_id"
             )
             results = list(
                 container.query_items(
@@ -454,6 +462,7 @@ class MessageProcessor:
                         {"name": "@contact_id", "value": contact_id},
                         {"name": "@account_id", "value": account_id},
                     ],
+                    partition_key=account_id,
                 )
             )
 

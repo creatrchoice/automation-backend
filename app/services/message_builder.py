@@ -6,6 +6,8 @@ import json
 import re
 from typing import Dict, Any, List, Optional
 
+from app.core.config import dm_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,6 +110,54 @@ class MessageBuilder:
             return {"type": "text", "content": {"text": tpl["message"]}}
 
         return {}
+
+    @staticmethod
+    def coerce_to_text_for_comment_private_reply(
+        msg: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Private replies to comments use the messaging API with recipient.comment_id.
+        Meta often rejects generic/carousel there (e.g. IGApiException 2018340). Use a
+        plain text body so at least one DM delivers; include title/subtitle content.
+        """
+        if not msg:
+            return msg
+        mtype = (msg.get("type") or "text").lower()
+        if mtype == "text":
+            return msg
+
+        content = msg.get("content") or {}
+        text_out = ""
+
+        if mtype == "generic":
+            title = (content.get("title") or "").strip()
+            subtitle = (content.get("subtitle") or "").strip()
+            lines = [x for x in (title, subtitle) if x]
+            text_out = "\n".join(lines) if lines else (title or subtitle or " ")
+        elif mtype == "carousel":
+            elements = content.get("elements") or []
+            parts: List[str] = []
+            for el in elements[:12]:
+                if not isinstance(el, dict):
+                    continue
+                t = (el.get("title") or "").strip()
+                s = (el.get("subtitle") or "").strip()
+                block = t + (f"\n{s}" if s else "")
+                if block.strip():
+                    parts.append(block.strip())
+            text_out = "\n\n".join(parts) if parts else " "
+        else:
+            return msg
+
+        text_out = (text_out or " ").strip() or " "
+        if len(text_out) > dm_settings.MAX_MESSAGE_LENGTH:
+            text_out = text_out[: dm_settings.MAX_MESSAGE_LENGTH - 1] + "…"
+
+        logger.info(
+            "Coerced %s template to plain text for Instagram comment private reply",
+            mtype,
+        )
+        return {"type": "text", "content": {"text": text_out}}
 
     @staticmethod
     def resolve_message_template(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:

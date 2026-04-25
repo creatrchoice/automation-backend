@@ -105,7 +105,15 @@ class ConditionalBranchSchema(BaseModel):
 
 
 class OnDeliverActionSchema(BaseModel):
-    """On-deliver action schema."""
+    """
+    On-deliver action stored on automation steps.
+
+    Stored documents use flexible dicts. Common pattern: ``{"type": "...", ...}``.
+    Supported ``type`` values include ``add_tag``, ``remove_tag``,
+    ``enable_human_handoff``, ``trigger_automation``, ``schedule_message``,
+    ``recheck_follow_status``, and ``reply_to_instagram_comment`` (public
+    reply to the user's comment; requires comment webhook context with ``comment_id``).
+    """
 
     action_type: str = Field(description="Action type (add_tag, set_field, etc.)")
     value: Any = Field(description="Action value")
@@ -113,8 +121,8 @@ class OnDeliverActionSchema(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "action_type": "add_tag",
-                "value": "engaged"
+                "type": "reply_to_instagram_comment",
+                "message": "Thanks! We sent you a DM."
             }
         }
 

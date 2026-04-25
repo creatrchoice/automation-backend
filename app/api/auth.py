@@ -541,7 +541,7 @@ async def get_instagram_state(
             f"https://www.instagram.com/oauth/authorize"
             f"?client_id={dm_settings.INSTAGRAM_APP_ID}"
             f"&redirect_uri={dm_settings.INSTAGRAM_REDIRECT_URI}"
-            f"&scope=instagram_business_basic,instagram_business_manage_messages"
+            f"&scope=instagram_business_basic,instagram_business_manage_messages,instagram_basic,instagram_manage_comments"
             f"&response_type=code"
             f"&state={state}"
         )
