@@ -541,7 +541,9 @@ async def get_instagram_state(
             f"https://www.instagram.com/oauth/authorize"
             f"?client_id={dm_settings.INSTAGRAM_APP_ID}"
             f"&redirect_uri={dm_settings.INSTAGRAM_REDIRECT_URI}"
-            f"&scope=instagram_business_basic,instagram_business_manage_messages,instagram_basic,instagram_manage_comments"
+            # Instagram Login endpoint accepts instagram_business_* scopes.
+            # Adding Graph/Facebook-style scopes here causes "Invalid platform app".
+            f"&scope=instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments"
             f"&response_type=code"
             f"&state={state}"
         )
@@ -558,13 +560,11 @@ async def get_instagram_state(
             user_title="Connection Error",
             user_message="Couldn't start Instagram connection. Please try again.",
         )
-
-
 @router.get("/instagram/callback")
 async def instagram_callback(
     request: Request,
     code: str,
-    state: str,
+    state: Optional[str] = None,
     redis_client=Depends(get_redis_client),
     cosmos_client=Depends(get_cosmos_client),
 ):
