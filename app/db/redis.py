@@ -36,7 +36,7 @@ def build_redis_ssl_context():
     return ctx
 
 
-def _build_redis_kwargs() -> dict:
+def _build_redis_kwargs(use_tls: bool = False) -> dict:
     """Build Redis connection kwargs from settings."""
     kwargs = {
         "host": dm_settings.REDIS_HOST,
@@ -50,7 +50,7 @@ def _build_redis_kwargs() -> dict:
     if dm_settings.REDIS_PASSWORD:
         kwargs["password"] = dm_settings.REDIS_PASSWORD
 
-    if redis_should_use_tls():
+    if use_tls:
         kwargs["ssl"] = build_redis_ssl_context()
 
     return kwargs
@@ -58,19 +58,34 @@ def _build_redis_kwargs() -> dict:
 
 def create_redis_client() -> redis.Redis:
     """Create a synchronous Redis client."""
-    try:
-        kwargs = _build_redis_kwargs()
-        client = redis.Redis(**kwargs)
-        # Test connection
-        client.ping()
-        logger.info(f"Redis connected to {dm_settings.REDIS_HOST}:{dm_settings.REDIS_PORT}")
-        return client
-    except redis.ConnectionError as e:
-        logger.warning(f"Redis connection failed (will retry on use): {e}")
-        return redis.Redis(**_build_redis_kwargs())
-    except Exception as e:
-        logger.error(f"Redis client creation failed: {e}")
-        raise
+    prefer_tls = redis_should_use_tls()
+    attempts = [prefer_tls] if prefer_tls else [False]
+    if prefer_tls:
+        # Some providers expose plaintext endpoints even when REDIS_SSL=true.
+        # Fall back to non-TLS automatically on SSL handshake failures.
+        attempts.append(False)
+
+    last_error = None
+    for use_tls in attempts:
+        try:
+            kwargs = _build_redis_kwargs(use_tls=use_tls)
+            client = redis.Redis(**kwargs)
+            client.ping()
+            mode = "TLS" if use_tls else "plaintext"
+            logger.info(
+                "Redis connected (%s) to %s:%s",
+                mode,
+                dm_settings.REDIS_HOST,
+                dm_settings.REDIS_PORT,
+            )
+            return client
+        except Exception as e:
+            last_error = e
+            mode = "TLS" if use_tls else "plaintext"
+            logger.warning("Redis %s connection failed: %s", mode, e)
+
+    logger.warning("Redis connection failed (will retry on use): %s", last_error)
+    return redis.Redis(**_build_redis_kwargs(use_tls=False))
 
 
 # Global sync Redis client (used by Celery workers and sync services)
@@ -78,4 +93,4 @@ try:
     redis_client = create_redis_client()
 except Exception:
     logger.warning("Redis client initialization deferred - will connect on first use")
-    redis_client = redis.Redis(**_build_redis_kwargs())
+    redis_client = redis.Redis(**_build_redis_kwargs(use_tls=False))

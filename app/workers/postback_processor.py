@@ -7,7 +7,7 @@ from datetime import datetime
 from app.core.config import dm_settings
 from app.db.cosmos_db import cosmos_db
 from app.db.redis import redis_client
-from app.workers.actions import execute_on_deliver_action
+from app.workers.step_delivery import run_step_on_deliver_actions
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +99,11 @@ class PostbackProcessor:
                 )
 
                 # Execute on-deliver actions
-                self._execute_on_deliver_actions(
-                    next_step, account_id, postback_data["contact_id"]
+                run_step_on_deliver_actions(
+                    account_id,
+                    postback_data["contact_id"],
+                    next_step,
+                    context=None,
                 )
 
             # Track button click analytics
@@ -572,29 +575,6 @@ class PostbackProcessor:
 
         except Exception as e:
             logger.error(f"Error sending message: {str(e)}")
-
-    def _execute_on_deliver_actions(
-        self, step: Dict[str, Any], account_id: str, contact_id: str
-    ) -> None:
-        """
-        Execute on-deliver actions after message is sent.
-
-        Actions: add_tag, enable_human_handoff, trigger_automation, schedule_message
-
-        Args:
-            step: Step configuration
-            account_id: Account ID
-            contact_id: Contact ID
-        """
-        try:
-            on_deliver_actions = step.get("on_deliver_actions", [])
-
-            for action in on_deliver_actions:
-                logger.debug(f"Executing on-deliver action: {action.get('type')}")
-                execute_on_deliver_action(action, account_id, contact_id)
-
-        except Exception as e:
-            logger.error(f"Error executing on-deliver actions: {str(e)}")
 
     def _track_button_click(
         self,

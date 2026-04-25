@@ -13,6 +13,7 @@ from app.db.repositories.automation_repository import (
 )
 from app.services.automation_matcher import matches_comment_trigger
 from app.workers.processor_utils import resolve_account_id_with_cache
+from app.workers.step_delivery import run_step_on_deliver_actions
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +368,11 @@ class CommentProcessor:
                 step, context, automation_id=automation.get("id")
             )
 
+            if message and context.get("trigger_type") == "comment":
+                message = message_builder.coerce_to_text_for_comment_private_reply(
+                    message
+                )
+
             # Send message — for comment triggers, use comment_id as recipient
             # Instagram API requires: recipient: { comment_id: "..." } for comment-to-DM
             if message:
@@ -378,6 +384,10 @@ class CommentProcessor:
                 # Log message delivery
                 self._log_message_delivery(
                     account_id, contact_id, step.get("id"), message, "sent"
+                )
+
+                run_step_on_deliver_actions(
+                    account_id, contact_id, step, context
                 )
 
         except Exception as e:
