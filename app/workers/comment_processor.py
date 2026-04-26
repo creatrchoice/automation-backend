@@ -397,7 +397,7 @@ class CommentProcessor:
 
                 # For comment-triggered private replies, try the full saved template first
                 # (including buttons). If Instagram rejects that shape for comment_id recipient,
-                # gracefully fall back to plain text.
+                # gracefully fall back to plain text, then attempt rich DM to user id.
                 if context.get("trigger_type") == "comment":
                     try:
                         logger.info(
@@ -449,6 +449,38 @@ class CommentProcessor:
                             contact_id,
                             comment_id,
                         )
+
+                        # Best-effort second step:
+                        # once we delivered a valid private reply for the comment, try to send the
+                        # original rich template to the commenter by user id so buttons still show.
+                        if message and message.get("type") in ("generic", "carousel"):
+                            try:
+                                logger.info(
+                                    "Attempting follow-up rich DM after fallback-text "
+                                    "automation_id=%s step_id=%s contact_id=%s message=%s",
+                                    automation.get("id"),
+                                    step.get("id"),
+                                    contact_id,
+                                    json.dumps(message, ensure_ascii=True, default=str),
+                                )
+                                instagram_api.send_dm_sync(
+                                    account_id, contact_id, message, comment_id=None
+                                )
+                                logger.info(
+                                    "Follow-up rich DM sent after fallback-text "
+                                    "automation_id=%s step_id=%s contact_id=%s",
+                                    automation.get("id"),
+                                    step.get("id"),
+                                    contact_id,
+                                )
+                            except InstagramAPIError as rich_err:
+                                logger.warning(
+                                    "Follow-up rich DM failed after fallback-text "
+                                    "automation_id=%s contact_id=%s error=%s",
+                                    automation.get("id"),
+                                    contact_id,
+                                    rich_err,
+                                )
                 else:
                     logger.info(
                         "Sending DM (non-comment trigger) automation_id=%s step_id=%s contact_id=%s message=%s",
