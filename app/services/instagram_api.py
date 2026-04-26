@@ -1,5 +1,6 @@
 """Instagram Graph API service for DM automation."""
 import asyncio
+import json
 import logging
 import threading
 from typing import Dict, Any, Optional, List
@@ -134,6 +135,16 @@ class InstagramAPI:
             request_body = self._build_send_message_request(
                 recipient_id, message_payload, comment_id=comment_id
             )
+            logger.info(
+                "Instagram outbound message payload account_id=%s graph_user_id=%s payload=%s",
+                account_id,
+                graph_user_id,
+                json.dumps(
+                    self._sanitize_request_for_logging(request_body),
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+            )
 
             # Make API call with retries for transient 5xx failures.
             max_attempts = 3
@@ -170,8 +181,15 @@ class InstagramAPI:
             if response.status_code not in (200, 201):
                 error_text = response.text
                 logger.error(
-                    f"Instagram API error for {account_id}: "
-                    f"status={response.status_code}, response={error_text}"
+                    "Instagram API error account_id=%s status=%s response=%s payload=%s",
+                    account_id,
+                    response.status_code,
+                    error_text,
+                    json.dumps(
+                        self._sanitize_request_for_logging(request_body),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
                 )
                 raise InstagramAPIError(
                     f"Instagram API returned {response.status_code}: {error_text}"
@@ -193,6 +211,9 @@ class InstagramAPI:
             }
 
         except (RateLimitExceeded, TokenExpired, InstagramAPIError):
+            raise
+        except ValueError:
+            # e.g. account document missing; keep message clear for API callers and scripts
             raise
         except Exception as e:
             logger.error(f"Error sending DM: {str(e)}")
@@ -399,6 +420,23 @@ class InstagramAPI:
             }
 
         return request
+
+    @staticmethod
+    def _sanitize_request_for_logging(request_body: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Return a log-safe copy of outbound payload.
+
+        We intentionally mask recipient identifiers while preserving the exact
+        message structure so template/debug issues are visible in logs.
+        """
+        safe = dict(request_body or {})
+        recipient = dict(safe.get("recipient") or {})
+        if "id" in recipient:
+            recipient["id"] = "***"
+        if "comment_id" in recipient:
+            recipient["comment_id"] = "***"
+        safe["recipient"] = recipient
+        return safe
 
     async def check_follow_status(
         self,
