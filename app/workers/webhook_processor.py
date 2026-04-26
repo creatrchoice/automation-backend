@@ -14,6 +14,7 @@ from app.workers.postback_processor import process_postback_webhook
 from app.db.cosmos_db import cosmos_db
 from app.db.cosmos_containers import CONTAINER_WEBHOOK_EVENTS
 from app.db.redis import redis_client
+from app.workers.webhook_error_handler import log_webhook_processing_failure
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +65,18 @@ class WebhookProcessor:
         Args:
             event: Webhook event payload from Instagram
         """
+        event_type = None
+        webhook_id = "unknown"
         try:
             event_type = self._determine_event_type(event)
             webhook_id = self._event_dedup_id(event)
 
             logger.info(f"Processing webhook event: {webhook_id} of type: {event_type}")
 
-            # Deduplicate events within 24-hour window
-            if self._is_duplicate_event(webhook_id):
-                logger.warning(f"Duplicate event detected: {webhook_id}, skipping")
-                return
+            # # Deduplicate events within 24-hour window
+            # if self._is_duplicate_event(webhook_id):
+            #     logger.warning(f"Duplicate event detected: {webhook_id}, skipping")
+            #     return
 
             # Store webhook event for audit trail
             self._store_webhook_event(event, event_type)
@@ -92,7 +95,9 @@ class WebhookProcessor:
                 logger.warning(f"Unknown webhook event type: {event_type}")
 
         except Exception as e:
-            logger.exception(f"Error processing webhook event: {str(e)}")
+            log_webhook_processing_failure(
+                event, event_type=event_type, webhook_id=webhook_id, exc=e
+            )
             self._store_failed_webhook_event(event, str(e))
             raise
 

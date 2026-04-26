@@ -164,17 +164,10 @@ class MessageBuilder:
         """
         Resolve a step document or nested template into canonical {type, content}.
 
-        Priority: message_template / template → message (nested) → flat message_text → normalize whole dict.
+        Priority: `message` (nested) → flat `message_text` on the step → normalize whole dict.
         """
         if not data:
             return {}
-
-        for key in ("message_template", "messageTemplate", "template"):
-            v = data.get(key)
-            if isinstance(v, dict) and v:
-                n = MessageBuilder.normalize_message_template(v)
-                if n:
-                    return n
 
         msg = data.get("message")
         if isinstance(msg, dict) and msg:
@@ -235,9 +228,41 @@ class MessageBuilder:
         """
         Build payload for instagram_api.send_dm: {"type": "...", "content": {...}}.
 
-        Accepts a full step (message_text, message_template, …) or a nested template dict.
+        Accepts a full step (`message` nested, or flat `message_text` on the step) or a template dict.
         """
         resolved = MessageBuilder.resolve_message_template(step_or_template or {})
+        if not resolved:
+            return None
+        if context:
+            resolved = MessageBuilder._interpolate_strings(resolved, context)
+        if automation_id:
+            resolved = MessageBuilder.encode_postbacks_in_canonical_template(
+                resolved, automation_id
+            )
+        return resolved
+
+    def build_comment_dm_from_step(
+        self,
+        step: Optional[Dict[str, Any]],
+        context: Optional[Dict[str, Any]] = None,
+        automation_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Build DM payload for the first `send_dm` / comment step: flat
+        `message_text`, `message_image_url`, `buttons` or nested `message` only.
+        """
+        if not step or not isinstance(step, dict):
+            return None
+        if isinstance(step.get("message"), dict) and step["message"]:
+            resolved = MessageBuilder.normalize_message_template(step["message"])
+        else:
+            resolved = MessageBuilder.normalize_message_template(
+                {
+                    "message_text": step.get("message_text") or "",
+                    "message_image_url": (step.get("message_image_url") or "").strip(),
+                    "buttons": list(step.get("buttons") or []),
+                }
+            )
         if not resolved:
             return None
         if context:

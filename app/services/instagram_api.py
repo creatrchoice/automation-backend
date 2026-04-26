@@ -408,6 +408,7 @@ class InstagramAPI:
         elif payload_type in ("generic", "carousel"):
             # Build generic template payload
             elements = content.get("elements", [content])  # Single element if not carousel
+            elements = self._sanitize_generic_elements(elements)
 
             request["message"] = {
                 "attachment": {
@@ -420,6 +421,51 @@ class InstagramAPI:
             }
 
         return request
+
+    @staticmethod
+    def _sanitize_generic_elements(elements: Any) -> List[Dict[str, Any]]:
+        """
+        Normalize generic template elements/buttons to Graph-supported shape.
+
+        Particularly important for postback buttons: Instagram rejects payloads when
+        extra keys like `url` are included on a postback button.
+        """
+        output: List[Dict[str, Any]] = []
+        for el in elements or []:
+            if not isinstance(el, dict):
+                continue
+
+            sanitized: Dict[str, Any] = {}
+            for key in ("title", "subtitle", "image_url"):
+                value = el.get(key)
+                if value is not None:
+                    sanitized[key] = value
+
+            raw_buttons = el.get("buttons") or []
+            buttons: List[Dict[str, Any]] = []
+            for btn in raw_buttons:
+                if not isinstance(btn, dict):
+                    continue
+                btn_type = str(btn.get("type", "")).lower().strip()
+                title = btn.get("title")
+                if btn_type == "postback":
+                    payload = btn.get("payload")
+                    if title and payload:
+                        buttons.append(
+                            {"type": "postback", "title": title, "payload": payload}
+                        )
+                elif btn_type == "web_url":
+                    url = btn.get("url")
+                    if title and url:
+                        buttons.append(
+                            {"type": "web_url", "title": title, "url": url}
+                        )
+
+            if buttons:
+                sanitized["buttons"] = buttons
+            output.append(sanitized)
+
+        return output
 
     @staticmethod
     def _sanitize_request_for_logging(request_body: Dict[str, Any]) -> Dict[str, Any]:
