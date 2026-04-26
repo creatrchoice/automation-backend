@@ -19,6 +19,28 @@ def run_step_on_deliver_actions(
     """
     try:
         actions = step.get("on_deliver_actions") or []
+
+        # Backward-compat: older/newer workflow schema may store public reply
+        # config directly on the step instead of on_deliver_actions.
+        if not actions and step.get("public_reply_enabled"):
+            variants = step.get("public_reply_variants") or []
+            public_reply_text = ""
+            if isinstance(variants, list) and variants:
+                public_reply_text = str(variants[0] or "").strip()
+            if public_reply_text:
+                actions = [
+                    {
+                        "type": "reply_to_instagram_comment",
+                        "message": public_reply_text,
+                        "only_if_send_succeeded": True,
+                    }
+                ]
+                logger.info(
+                    "Synthesized on_deliver public reply action from step config step_id=%s message=%s",
+                    step.get("id"),
+                    public_reply_text,
+                )
+
         logger.info(
             "Running on_deliver_actions account_id=%s contact_id=%s step_id=%s action_count=%s comment_id=%s",
             account_id,
