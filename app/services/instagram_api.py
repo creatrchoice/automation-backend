@@ -380,15 +380,13 @@ class InstagramAPI:
         """
         Build request body for send message API call.
 
-        Text private replies: ``recipient: { comment_id }``. Templates:
-        ``recipient: { id }`` (``comment_id`` is ignored for generic / carousel).
+        Prefer ``recipient: { comment_id }`` when provided. Falls back to
+        ``recipient: { id }`` when no comment id is available.
         """
         payload_type = message_payload.get("type", "text").lower()
         content = message_payload.get("content", {})
 
-        if payload_type in ("generic", "carousel"):
-            recipient = {"id": recipient_id}
-        elif comment_id:
+        if comment_id:
             recipient = {"comment_id": comment_id}
         else:
             recipient = {"id": recipient_id}
