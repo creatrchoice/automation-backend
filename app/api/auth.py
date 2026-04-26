@@ -707,11 +707,22 @@ async def instagram_callback(
                     ),
                 )
 
-            if account_type not in ["CREATOR", "BUSINESS"]:
+            allowed_account_types = {"CREATOR", "MEDIA_CREATOR", "BUSINESS"}
+            if account_type not in allowed_account_types:
+                logger.warning(
+                    "OAuth callback rejecting account_type=%s (allowed=%s) for ig_user_id=%s username=%s",
+                    account_type,
+                    sorted(allowed_account_types),
+                    ig_user_id,
+                    profile_data.get("username"),
+                )
                 raise BadRequestError(
                     message=f"Unsupported account type: {account_type}",
                     user_title="Account Not Supported",
-                    user_message="Only Creator and Business Instagram accounts can use messaging automation. Please switch your account type and try again.",
+                    user_message=(
+                        "Only Creator/Media Creator and Business Instagram accounts "
+                        "can use messaging automation. Please switch your account type and try again."
+                    ),
                 )
 
             stage = "ownership_check"
@@ -811,6 +822,12 @@ async def instagram_callback(
             )
 
     except (BadRequestError, ExternalServiceError, DuplicateEntityError) as exc:
+        logger.warning(
+            "OAuth callback handled error at stage=%s: %s | user_message=%s",
+            stage,
+            exc.message,
+            exc.user_message,
+        )
         is_api_call = "application/json" in request.headers.get("accept", "")
         if is_api_call:
             raise exc
