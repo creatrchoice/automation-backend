@@ -43,50 +43,43 @@ class MessageProcessor:
         Args:
             event: Message webhook event payload
         """
-        try:
-            # Extract message data from webhook
-            message_data = self._extract_message_data(event)
+        # Extract message data from webhook
+        message_data = self._extract_message_data(event)
 
-            if not message_data:
-                logger.warning("Unable to extract message data from webhook")
-                return
+        if not message_data:
+            logger.warning("Unable to extract message data from webhook")
+            return
 
-            logger.info(
-                f"Processing message from contact {message_data['from_id']}, "
-                f"type: {message_data['message_type']}"
+        logger.info(
+            f"Processing message from contact {message_data['from_id']}, "
+            f"type: {message_data['message_type']}"
+        )
+
+        # Resolve account_id
+        account_id = self._resolve_account_id(message_data["ig_user_id"])
+
+        if not account_id:
+            logger.error(
+                f"Unable to resolve account for Instagram user {message_data['ig_user_id']}"
             )
+            return
 
-            # Resolve account_id
-            account_id = self._resolve_account_id(message_data["ig_user_id"])
+        # Update contact's messaging window
+        self._refresh_messaging_window(account_id, message_data["from_id"])
 
-            if not account_id:
-                logger.error(
-                    f"Unable to resolve account for Instagram user {message_data['ig_user_id']}"
-                )
-                return
+        # Load and match automations
+        matching_automations = self._match_automations(
+            account_id, message_data["message_type"], message_data
+        )
 
-            # Update contact's messaging window
-            self._refresh_messaging_window(account_id, message_data["from_id"])
+        if matching_automations:
+            logger.info(f"Found {len(matching_automations)} matching automations")
 
-            # Load and match automations
-            matching_automations = self._match_automations(
-                account_id, message_data["message_type"], message_data
-            )
+            for automation in matching_automations:
+                self._execute_automation(automation, account_id, message_data)
 
-            if matching_automations:
-                logger.info(f"Found {len(matching_automations)} matching automations")
-
-                # Execute matched automations
-                for automation in matching_automations:
-                    self._execute_automation(automation, account_id, message_data)
-
-            else:
-                # Check for human handoff if contact has active automation
-                self._check_human_handoff(account_id, message_data)
-
-        except Exception as e:
-            logger.exception(f"Error processing message webhook: {str(e)}")
-            raise
+        else:
+            self._check_human_handoff(account_id, message_data)
 
     def _extract_message_data(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -417,7 +410,7 @@ class MessageProcessor:
 
             logger.info(f"Executing step {step.get('id')}")
 
-            # Build and send message (step may store message_text / message_template / message on the step)
+            # Build and send message (step: nested `message` and/or flat message_text on the step)
             message = message_builder.build_message(
                 step, context, automation_id=automation.get("id")
             )

@@ -94,17 +94,15 @@ class InstagramAPI:
         - generic_template: Card with buttons
         - carousel: Multiple cards with buttons
 
-        For comment-triggered automations, pass comment_id to send the DM
-        as a reply to the comment. Instagram requires:
-            recipient: { comment_id: "<COMMENT_ID>" }
-        instead of:
-            recipient: { id: "<USER_ID>" }
+        For **text** only, you may set ``comment_id`` to send a private reply on the
+        comment thread. **Generic** and **carousel** always use
+        ``recipient: { "id": recipient_id }``; ``comment_id`` is ignored for those.
 
         Args:
             account_id: Instagram account ID (business account)
             recipient_id: Recipient's IG user ID (used for regular DMs)
             message_payload: Message payload dict with 'type' and 'content'
-            comment_id: If set, sends DM as reply to this comment (for comment automations)
+            comment_id: Text-only: private comment reply. Ignored for templates.
 
         Returns:
             API response with message_id
@@ -382,16 +380,15 @@ class InstagramAPI:
         """
         Build request body for send message API call.
 
-        For comment-triggered DMs, Instagram requires:
-            recipient: { comment_id: "<COMMENT_ID>" }
-        For regular DMs:
-            recipient: { id: "<USER_ID>" }
+        Text private replies: ``recipient: { comment_id }``. Templates:
+        ``recipient: { id }`` (``comment_id`` is ignored for generic / carousel).
         """
         payload_type = message_payload.get("type", "text").lower()
         content = message_payload.get("content", {})
 
-        # Comment-triggered DMs use comment_id as recipient (Instagram API requirement)
-        if comment_id:
+        if payload_type in ("generic", "carousel"):
+            recipient = {"id": recipient_id}
+        elif comment_id:
             recipient = {"comment_id": comment_id}
         else:
             recipient = {"id": recipient_id}
@@ -408,6 +405,7 @@ class InstagramAPI:
         elif payload_type in ("generic", "carousel"):
             # Build generic template payload
             elements = content.get("elements", [content])  # Single element if not carousel
+            elements = self._sanitize_generic_elements(elements)
 
             request["message"] = {
                 "attachment": {
@@ -420,6 +418,51 @@ class InstagramAPI:
             }
 
         return request
+
+    @staticmethod
+    def _sanitize_generic_elements(elements: Any) -> List[Dict[str, Any]]:
+        """
+        Normalize generic template elements/buttons to Graph-supported shape.
+
+        Particularly important for postback buttons: Instagram rejects payloads when
+        extra keys like `url` are included on a postback button.
+        """
+        output: List[Dict[str, Any]] = []
+        for el in elements or []:
+            if not isinstance(el, dict):
+                continue
+
+            sanitized: Dict[str, Any] = {}
+            for key in ("title", "subtitle", "image_url"):
+                value = el.get(key)
+                if value is not None:
+                    sanitized[key] = value
+
+            raw_buttons = el.get("buttons") or []
+            buttons: List[Dict[str, Any]] = []
+            for btn in raw_buttons:
+                if not isinstance(btn, dict):
+                    continue
+                btn_type = str(btn.get("type", "")).lower().strip()
+                title = btn.get("title")
+                if btn_type == "postback":
+                    payload = btn.get("payload")
+                    if title and payload:
+                        buttons.append(
+                            {"type": "postback", "title": title, "payload": payload}
+                        )
+                elif btn_type == "web_url":
+                    url = btn.get("url")
+                    if title and url:
+                        buttons.append(
+                            {"type": "web_url", "title": title, "url": url}
+                        )
+
+            if buttons:
+                sanitized["buttons"] = buttons
+            output.append(sanitized)
+
+        return output
 
     @staticmethod
     def _sanitize_request_for_logging(request_body: Dict[str, Any]) -> Dict[str, Any]:

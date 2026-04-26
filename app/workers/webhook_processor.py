@@ -5,7 +5,7 @@ import time
 import hashlib
 from typing import Dict, Any, Optional
 from enum import Enum
-from datetime import datetime, timedelta
+from datetime import datetime
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
 from app.core.config import dm_settings
 from app.workers.comment_processor import process_comment_webhook
@@ -13,7 +13,6 @@ from app.workers.message_processor import process_message_webhook
 from app.workers.postback_processor import process_postback_webhook
 from app.db.cosmos_db import cosmos_db
 from app.db.cosmos_containers import CONTAINER_WEBHOOK_EVENTS
-from app.db.redis import redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +63,13 @@ class WebhookProcessor:
         Args:
             event: Webhook event payload from Instagram
         """
+        event_type = None
+        webhook_id = "unknown"
         try:
             event_type = self._determine_event_type(event)
             webhook_id = self._event_dedup_id(event)
 
             logger.info(f"Processing webhook event: {webhook_id} of type: {event_type}")
-
-            # Deduplicate events within 24-hour window
-            if self._is_duplicate_event(webhook_id):
-                logger.warning(f"Duplicate event detected: {webhook_id}, skipping")
-                return
 
             # Store webhook event for audit trail
             self._store_webhook_event(event, event_type)
@@ -92,7 +88,12 @@ class WebhookProcessor:
                 logger.warning(f"Unknown webhook event type: {event_type}")
 
         except Exception as e:
-            logger.exception(f"Error processing webhook event: {str(e)}")
+            logger.exception(
+                "Webhook processing failed webhook_id=%s event_type=%s ig_account_id=%s",
+                webhook_id,
+                event_type,
+                event.get("ig_account_id"),
+            )
             self._store_failed_webhook_event(event, str(e))
             raise
 
@@ -159,63 +160,6 @@ class WebhookProcessor:
             return WebhookEventType.POSTBACK
 
         return WebhookEventType.UNKNOWN
-
-    def _is_duplicate_event(self, event_id: str) -> bool:
-        """
-        Check if event has been processed recently (deduplication).
-
-        Args:
-            event_id: Webhook event ID
-
-        Returns:
-            True if duplicate, False otherwise
-        """
-        if not event_id or event_id == "unknown":
-            logger.debug("Skipping dedup check for missing/unknown event_id")
-            return False
-
-        dedup_key = f"webhook:dedup:{event_id}"
-        ttl_seconds = dm_settings.DEDUP_TTL_HOURS * 3600
-
-        # Preferred path: Redis cache dedup for fast checks.
-        try:
-            if redis_client.exists(dedup_key):
-                return True
-            redis_client.setex(dedup_key, ttl_seconds, "1")
-            return False
-        except Exception as redis_err:
-            logger.warning(
-                "Redis unavailable for dedup (event_id=%s), falling back to Cosmos DB: %s",
-                event_id,
-                redis_err,
-            )
-
-        # Fallback path: Cosmos DB dedup when Redis is unavailable.
-        try:
-            container = cosmos_db.get_container_client(self.container_name)
-            cutoff_iso = (datetime.utcnow() - timedelta(seconds=ttl_seconds)).isoformat()
-            query = (
-                "SELECT VALUE COUNT(1) FROM c "
-                "WHERE c.id = @event_id AND c.processed_at >= @cutoff"
-            )
-            existing = list(
-                container.query_items(
-                    query=query,
-                    parameters=[
-                        {"name": "@event_id", "value": event_id},
-                        {"name": "@cutoff", "value": cutoff_iso},
-                    ],
-                    enable_cross_partition_query=True,
-                )
-            )
-            return bool(existing and existing[0] > 0)
-        except Exception as cosmos_err:
-            logger.error(
-                "Cosmos dedup fallback failed for event_id=%s: %s. Continuing without dedup.",
-                event_id,
-                cosmos_err,
-            )
-            return False
 
     def _event_dedup_id(self, event: Dict[str, Any]) -> str:
         """
@@ -385,7 +329,7 @@ class WebhookProcessor:
             self.process_webhook_event(event)
             return {"status": "success", "event_id": event.get("id")}
         except Exception as e:
-            logger.error(f"Synchronous webhook processing failed: {str(e)}")
+            logger.exception("Synchronous webhook processing failed: %s", e)
             return {"status": "error", "error": str(e)}
 
 

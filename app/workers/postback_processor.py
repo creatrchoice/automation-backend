@@ -31,94 +31,86 @@ class PostbackProcessor:
         Args:
             event: Postback webhook event payload
         """
-        try:
-            # Extract postback data
-            postback_data = self._extract_postback_data(event)
+        # Extract postback data
+        postback_data = self._extract_postback_data(event)
 
-            if not postback_data:
-                logger.warning("Unable to extract postback data from webhook")
-                return
+        if not postback_data:
+            logger.warning("Unable to extract postback data from webhook")
+            return
 
-            logger.info(
-                f"Processing postback from contact {postback_data['contact_id']}, "
-                f"automation: {postback_data['automation_id']}"
-            )
+        logger.info(
+            f"Processing postback from contact {postback_data['contact_id']}, "
+            f"automation: {postback_data['automation_id']}"
+        )
 
-            # Resolve account_id
-            account_id = self._resolve_account_id(postback_data["ig_user_id"])
+        # Resolve account_id
+        account_id = self._resolve_account_id(postback_data["ig_user_id"])
 
-            if not account_id:
-                logger.error("Unable to resolve account ID")
-                return
+        if not account_id:
+            logger.error("Unable to resolve account ID")
+            return
 
-            # Decode and validate postback payload
-            payload_data = self._decode_postback_payload(postback_data["payload"])
+        # Decode and validate postback payload
+        payload_data = self._decode_postback_payload(postback_data["payload"])
 
-            if not payload_data:
-                logger.error("Failed to decode postback payload")
-                return
+        if not payload_data:
+            logger.error("Failed to decode postback payload")
+            return
 
-            # Load automation
-            automation = self._load_automation(
-                account_id, payload_data["automation_id"]
-            )
+        # Load automation
+        automation = self._load_automation(
+            account_id, payload_data["automation_id"]
+        )
 
-            if not automation:
-                logger.error(f"Automation {payload_data['automation_id']} not found")
-                return
+        if not automation:
+            logger.error(f"Automation {payload_data['automation_id']} not found")
+            return
 
-            # Get next step
-            next_step = self._get_next_step(
-                automation, payload_data["next_step_id"]
-            )
+        # Get next step
+        next_step = self._get_next_step(
+            automation, payload_data["next_step_id"]
+        )
 
-            if not next_step:
-                logger.warning(f"Next step {payload_data['next_step_id']} not found")
-                return
+        if not next_step:
+            logger.warning(f"Next step {payload_data['next_step_id']} not found")
+            return
 
-            # Refresh 24-hour messaging window
-            self._refresh_messaging_window(account_id, postback_data["contact_id"])
+        # Refresh 24-hour messaging window
+        self._refresh_messaging_window(account_id, postback_data["contact_id"])
 
-            # Execute pre-actions
-            self._execute_pre_actions(next_step, account_id, postback_data)
+        # Execute pre-actions
+        self._execute_pre_actions(next_step, account_id, postback_data)
 
-            # Resolve branch conditions
-            resolved_message = self._resolve_branch_conditions(
-                next_step, account_id, postback_data
-            )
+        # Resolve branch conditions
+        resolved_message = self._resolve_branch_conditions(
+            next_step, account_id, postback_data
+        )
 
-            if resolved_message:
-                # Send next message
-                self._send_message(
-                    account_id,
-                    postback_data["contact_id"],
-                    resolved_message,
-                    automation,
-                    next_step,
-                    postback_data,
-                )
-
-                # Execute on-deliver actions
-                run_step_on_deliver_actions(
-                    account_id,
-                    postback_data["contact_id"],
-                    next_step,
-                    context=None,
-                )
-
-            # Track button click analytics
-            self._track_button_click(
+        if resolved_message:
+            self._send_message(
                 account_id,
-                postback_data,
+                postback_data["contact_id"],
+                resolved_message,
                 automation,
                 next_step,
+                postback_data,
             )
 
-            logger.info("Postback processing completed successfully")
+            run_step_on_deliver_actions(
+                account_id,
+                postback_data["contact_id"],
+                next_step,
+                context=None,
+            )
 
-        except Exception as e:
-            logger.exception(f"Error processing postback webhook: {str(e)}")
-            raise
+        self._track_button_click(
+            account_id,
+            postback_data,
+            automation,
+            next_step,
+        )
+
+        logger.info("Postback processing completed successfully")
 
     def _extract_postback_data(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
