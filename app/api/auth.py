@@ -47,6 +47,11 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 CSRF_STATE_EXPIRY = 600  # 10 minutes
 INSTAGRAM_TOKEN_CONTAINER = CONTAINER_IG_ACCOUNTS
 USERS_CONTAINER = CONTAINER_USERS
+INSTAGRAM_LOGIN_SCOPES = [
+    "instagram_business_basic",
+    "instagram_business_manage_messages",
+    "instagram_business_manage_comments",
+]
 
 
 def _oauth_expires_at_utc(expires_raw) -> Optional[datetime]:
@@ -543,7 +548,7 @@ async def get_instagram_state(
             f"&redirect_uri={dm_settings.INSTAGRAM_REDIRECT_URI}"
             # Instagram Login endpoint accepts instagram_business_* scopes.
             # Adding Graph/Facebook-style scopes here causes "Invalid platform app".
-            f"&scope=instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments"
+            f"&scope={','.join(INSTAGRAM_LOGIN_SCOPES)}"
             f"&response_type=code"
             f"&state={state}"
         )
@@ -627,7 +632,11 @@ async def instagram_callback(
                     message=f"Token exchange failed: {token_response.text}",
                     user_message="Instagram couldn't verify your authorization. Please try again.",
                 )
-            logger.info("OAuth short token exchange successful")
+            logger.info(
+                "OAuth short token exchange successful: status=%s raw_body=%s",
+                token_response.status_code,
+                token_response.text,
+            )
 
             token_data = token_response.json()
             short_token = token_data.get("access_token")
@@ -656,11 +665,37 @@ async def instagram_callback(
                     message=f"Long token exchange failed: {long_token_response.text}",
                     user_message="Couldn't complete Instagram authorization. Please try again.",
                 )
-            logger.info("OAuth long token exchange successful")
+            logger.info(
+                "OAuth long token exchange successful: status=%s raw_body=%s",
+                long_token_response.status_code,
+                long_token_response.text,
+            )
 
             long_token_data = long_token_response.json()
             long_token = long_token_data.get("access_token")
             expires_in = long_token_data.get("expires_in", 5184000)
+
+            # Instagram may return granted scope metadata depending on API/version.
+            raw_scope_value = (
+                token_data.get("scope")
+                or token_data.get("scopes")
+                or long_token_data.get("scope")
+                or long_token_data.get("scopes")
+            )
+            if isinstance(raw_scope_value, str):
+                granted_scopes = [s.strip() for s in raw_scope_value.split(",") if s.strip()]
+            elif isinstance(raw_scope_value, list):
+                granted_scopes = [str(s).strip() for s in raw_scope_value if str(s).strip()]
+            else:
+                granted_scopes = []
+            logger.info(
+                "OAuth scope extraction: raw_scope_type=%s granted_scopes=%s",
+                type(raw_scope_value).__name__,
+                granted_scopes,
+            )
+
+            # Persist known requested scopes so frontend can reliably display permissions.
+            permissions = granted_scopes or INSTAGRAM_LOGIN_SCOPES.copy()
 
             if not long_token:
                 raise BadRequestError(
@@ -685,6 +720,11 @@ async def instagram_callback(
                     message=f"Profile fetch failed: {profile_response.text}",
                     user_message="Couldn't fetch your Instagram profile. Please try again.",
                 )
+            logger.info(
+                "OAuth profile fetch successful: status=%s raw_body=%s",
+                profile_response.status_code,
+                profile_response.text,
+            )
 
             profile_data = profile_response.json()
             account_type = profile_data.get("account_type")
@@ -751,6 +791,7 @@ async def instagram_callback(
                 "followers_count": profile_data.get("followers_count"),
                 "access_token": long_token,
                 "token_expires_in": expires_in,
+                "permissions": permissions,
                 "status": "active",
                 "created_at": None,
                 "updated_at": None,
@@ -758,10 +799,22 @@ async def instagram_callback(
 
             await accounts_container.upsert_item(body=account_doc)
             logger.info(
-                "OAuth account upserted: account_id=%s account_type=%s owner_user_id=%s",
+                "OAuth account upserted: account_id=%s account_type=%s owner_user_id=%s permissions=%s",
                 account_id,
                 account_type,
                 owner_user_id,
+                permissions,
+            )
+            logger.info(
+                "OAuth account document snapshot: %s",
+                {
+                    "id": account_doc.get("id"),
+                    "ig_user_id": account_doc.get("ig_user_id"),
+                    "username": account_doc.get("username"),
+                    "account_type": account_doc.get("account_type"),
+                    "permissions": account_doc.get("permissions"),
+                    "webhook_subscribed": account_doc.get("webhook_subscribed"),
+                },
             )
 
             # Step 6: Subscribe to webhook events (messages, messaging_postbacks, comments)
