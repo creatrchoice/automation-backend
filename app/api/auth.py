@@ -569,8 +569,17 @@ async def instagram_callback(
     cosmos_client=Depends(get_cosmos_client),
 ):
     """Handle Instagram OAuth callback (Instagram Login flow, no Facebook Page required)."""
+    stage = "start"
     try:
+        logger.info(
+            "OAuth callback started: has_code=%s has_state=%s client=%s",
+            bool(code),
+            bool(state),
+            request.client.host if request.client else "unknown",
+        )
+
         # Step 1: Verify CSRF state (Redis first, then Cosmos fallback)
+        stage = "csrf_state_verification"
         redis_key = f"oauth_state:{state}"
         owner_user_id: Optional[str] = None
 
@@ -595,8 +604,10 @@ async def instagram_callback(
                 user_title="Session Expired",
                 user_message="Your connection session has expired. Please try connecting again.",
             )
+        logger.info("OAuth callback state verified for user_id=%s", owner_user_id)
 
         # Step 2: Exchange code for short-lived token
+        stage = "short_token_exchange"
         async with httpx.AsyncClient() as client:
             token_response = await client.post(
                 "https://api.instagram.com/oauth/access_token",
@@ -616,6 +627,7 @@ async def instagram_callback(
                     message=f"Token exchange failed: {token_response.text}",
                     user_message="Instagram couldn't verify your authorization. Please try again.",
                 )
+            logger.info("OAuth short token exchange successful")
 
             token_data = token_response.json()
             short_token = token_data.get("access_token")
@@ -627,6 +639,7 @@ async def instagram_callback(
                 )
 
             # Step 3: Exchange for long-lived token (60 days)
+            stage = "long_token_exchange"
             long_token_response = await client.get(
                 "https://graph.instagram.com/access_token",
                 params={
@@ -643,6 +656,7 @@ async def instagram_callback(
                     message=f"Long token exchange failed: {long_token_response.text}",
                     user_message="Couldn't complete Instagram authorization. Please try again.",
                 )
+            logger.info("OAuth long token exchange successful")
 
             long_token_data = long_token_response.json()
             long_token = long_token_data.get("access_token")
@@ -655,6 +669,7 @@ async def instagram_callback(
                 )
 
             # Step 4: Fetch user profile
+            stage = "profile_fetch"
             profile_response = await client.get(
                 f"{dm_settings.INSTAGRAM_API_BASE_URL}/{dm_settings.INSTAGRAM_API_VERSION}/me",
                 params={
@@ -673,7 +688,24 @@ async def instagram_callback(
 
             profile_data = profile_response.json()
             account_type = profile_data.get("account_type")
-            ig_user_id = profile_data.get("user_id")
+            ig_user_id = profile_data.get("user_id") or profile_data.get("id")
+            logger.info(
+                "OAuth profile fetched: account_type=%s ig_user_id=%s username=%s keys=%s",
+                account_type,
+                ig_user_id,
+                profile_data.get("username"),
+                sorted(profile_data.keys()),
+            )
+
+            if not ig_user_id:
+                raise BadRequestError(
+                    message=f"Instagram profile missing id/user_id: {profile_data}",
+                    user_title="Profile Incomplete",
+                    user_message=(
+                        "Instagram profile response did not include an account id. "
+                        "Please try reconnecting the account."
+                    ),
+                )
 
             if account_type not in ["CREATOR", "BUSINESS"]:
                 raise BadRequestError(
@@ -682,6 +714,7 @@ async def instagram_callback(
                     user_message="Only Creator and Business Instagram accounts can use messaging automation. Please switch your account type and try again.",
                 )
 
+            stage = "ownership_check"
             accounts_container = await cosmos_client.get_async_container_client(
                 INSTAGRAM_TOKEN_CONTAINER
             )
@@ -692,6 +725,7 @@ async def instagram_callback(
             )
 
             # Step 5: Store in Cosmos DB
+            stage = "account_upsert"
             account_id = f"instagram_{ig_user_id}"
             account_doc = {
                 "id": account_id,
@@ -712,11 +746,23 @@ async def instagram_callback(
             }
 
             await accounts_container.upsert_item(body=account_doc)
+            logger.info(
+                "OAuth account upserted: account_id=%s account_type=%s owner_user_id=%s",
+                account_id,
+                account_type,
+                owner_user_id,
+            )
 
             # Step 6: Subscribe to webhook events (messages, messaging_postbacks, comments)
+            stage = "webhook_subscribe"
             webhook_ok = await _subscribe_webhook_events(
                 ig_user_id=ig_user_id,
                 access_token=long_token,
+            )
+            logger.info(
+                "OAuth webhook subscribe result: account_id=%s success=%s",
+                account_id,
+                webhook_ok,
             )
 
             # Update account doc with webhook subscription status
@@ -726,11 +772,20 @@ async def instagram_callback(
                 await accounts_container.upsert_item(body=account_doc)
 
             # Step 7: Cache in Redis
-            await redis_client.setex(
-                f"account:{account_id}",
-                86400 * 30,
-                str(profile_data),
-            )
+            stage = "cache_write"
+            try:
+                await redis_client.setex(
+                    f"account:{account_id}",
+                    86400 * 30,
+                    str(profile_data),
+                )
+            except Exception as cache_err:
+                # Cache is best-effort; account is already connected in Cosmos.
+                logger.warning(
+                    "OAuth callback cache write failed for %s: %s (continuing)",
+                    account_id,
+                    cache_err,
+                )
 
             # Check if called from frontend API (wants JSON) or browser redirect (Instagram)
             is_api_call = "application/json" in request.headers.get("accept", "")
@@ -745,6 +800,11 @@ async def instagram_callback(
                 return result
 
             params = urlencode(result)
+            logger.info(
+                "OAuth callback completed successfully: account_id=%s username=%s",
+                account_id,
+                profile_data.get("username", ""),
+            )
             return RedirectResponse(
                 url=f"{dm_settings.FRONTEND_URL}/auth/redirect?{params}",
                 status_code=302,
@@ -761,7 +821,7 @@ async def instagram_callback(
             status_code=302,
         )
     except Exception as e:
-        logger.error(f"OAuth callback error: {e}")
+        logger.error("OAuth callback error at stage=%s: %s", stage, e, exc_info=True)
         is_api_call = "application/json" in request.headers.get("accept", "")
         if is_api_call:
             raise InternalServerError(
