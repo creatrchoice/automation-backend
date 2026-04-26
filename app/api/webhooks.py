@@ -313,16 +313,11 @@ async def _dispatch_event(event_envelope: dict):
     """
     Dispatch a single event to the processing pipeline.
 
-    Dispatch behavior is controlled by environment flags:
-    - ENABLE_WEBHOOK_QUEUE_SERVICE (default false): enqueue to Service Bus
-    - ENABLE_WEBHOOK_INLINE_FALLBACK_ON_RECEIVE (default true): process inline at webhook receive-time
+    - ENABLE_WEBHOOK_QUEUE_SERVICE: enqueue to Service Bus
+    - ENABLE_WEBHOOK_INLINE_FALLBACK_ON_RECEIVE: process inline when not handled by the queue
 
-    When both are enabled and queue dispatch succeeds, the event is processed twice:
-    1) Immediately at webhook receive-time
-    2) Again when the queue worker fetches the event
-
-    Args:
-        event_envelope: Wrapped event with metadata
+    If enqueue succeeds, only the worker should process (skip inline), or local dev will
+    never send DMs while no worker consumes the queue.
     """
     try:
         queue_enabled = dm_settings.ENABLE_WEBHOOK_QUEUE_SERVICE
@@ -366,9 +361,15 @@ async def _dispatch_event(event_envelope: dict):
         else:
             logger.debug("Queue dispatch skipped because ENABLE_WEBHOOK_QUEUE_SERVICE is false")
 
-        # Option 2: Inline processing at receive-time (default enabled).
-        # If queue also succeeds, this intentionally causes a second processing cycle
-        # when the worker later consumes the queued event.
+        if queue_enabled and queued_successfully:
+            logger.info(
+                "Webhook event queued only (no inline): account=%s — ensure a queue worker is running, "
+                "or set ENABLE_WEBHOOK_QUEUE_SERVICE=false for local curl tests",
+                event_envelope.get("ig_account_id"),
+            )
+            return
+
+        # Option 2: Inline at receive-time, or fallback when queue is off / enqueue failed
         if inline_enabled:
             from app.workers.webhook_processor import webhook_processor
             webhook_processor.process_webhook_synchronously(event_envelope)

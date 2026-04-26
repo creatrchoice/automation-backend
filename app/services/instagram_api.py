@@ -94,17 +94,15 @@ class InstagramAPI:
         - generic_template: Card with buttons
         - carousel: Multiple cards with buttons
 
-        For comment-triggered automations, pass comment_id to send the DM
-        as a reply to the comment. Instagram requires:
-            recipient: { comment_id: "<COMMENT_ID>" }
-        instead of:
-            recipient: { id: "<USER_ID>" }
+        For **text** only, you may set ``comment_id`` to send a private reply on the
+        comment thread. **Generic** and **carousel** always use
+        ``recipient: { "id": recipient_id }``; ``comment_id`` is ignored for those.
 
         Args:
             account_id: Instagram account ID (business account)
             recipient_id: Recipient's IG user ID (used for regular DMs)
             message_payload: Message payload dict with 'type' and 'content'
-            comment_id: If set, sends DM as reply to this comment (for comment automations)
+            comment_id: Text-only: private comment reply. Ignored for templates.
 
         Returns:
             API response with message_id
@@ -382,16 +380,15 @@ class InstagramAPI:
         """
         Build request body for send message API call.
 
-        For comment-triggered DMs, Instagram requires:
-            recipient: { comment_id: "<COMMENT_ID>" }
-        For regular DMs:
-            recipient: { id: "<USER_ID>" }
+        Text private replies: ``recipient: { comment_id }``. Templates:
+        ``recipient: { id }`` (``comment_id`` is ignored for generic / carousel).
         """
         payload_type = message_payload.get("type", "text").lower()
         content = message_payload.get("content", {})
 
-        # Comment-triggered DMs use comment_id as recipient (Instagram API requirement)
-        if comment_id:
+        if payload_type in ("generic", "carousel"):
+            recipient = {"id": recipient_id}
+        elif comment_id:
             recipient = {"comment_id": comment_id}
         else:
             recipient = {"id": recipient_id}

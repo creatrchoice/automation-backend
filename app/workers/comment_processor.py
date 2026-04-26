@@ -1,13 +1,9 @@
 """Comment webhook processor for handling Instagram comment events."""
-import json
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from app.db.cosmos_db import cosmos_db
-from app.db.cosmos_containers import (
-    CONTAINER_CONTACTS,
-    CONTAINER_MESSAGE_LOGS,
-)
+from app.db.cosmos_containers import CONTAINER_MESSAGE_LOGS
 from app.db.repositories.automation_repository import (
     list_enabled_automations_for_account,
 )
@@ -16,7 +12,7 @@ from app.services.automation_conditions import (
     apply_cooldown_from_automation,
     passes_comment_automation_conditions,
 )
-from app.workers.processor_utils import resolve_account_id_with_cache
+from app.workers.processor_utils import match_keywords, resolve_account_id_with_cache
 from app.workers.step_delivery import run_step_on_deliver_actions
 
 logger = logging.getLogger(__name__)
@@ -26,8 +22,6 @@ class CommentProcessor:
     """Process comment webhook events."""
 
     def __init__(self):
-        """Initialize comment processor."""
-        self.contacts_container = CONTAINER_CONTACTS
         self.message_logs_container = CONTAINER_MESSAGE_LOGS
 
     def process_comment_webhook(self, event: Dict[str, Any]) -> None:
@@ -63,7 +57,14 @@ class CommentProcessor:
         )
 
         if not matching_automations:
-            logger.debug("No matching automations found for comment event")
+            logger.info(
+                "No comment automation to run for account_id=%s media_id=%s "
+                "comment=%r (check enabled automations, trigger/keywords, "
+                "trigger_conditions, or conditions.cooldown in Redis). No DM sent.",
+                account_id,
+                comment_data.get("media_id"),
+                (comment_data.get("comment_text") or "")[:200],
+            )
             return
 
         logger.info("Found %s matching automations", len(matching_automations))
@@ -119,17 +120,12 @@ class CommentProcessor:
         for automation in results:
             if automation.get("deleted_at"):
                 continue
-            if not self._is_matching_comment_trigger(automation, trigger_type, context):
+            if not matches_comment_trigger(automation, trigger_type, context):
                 continue
-            if not passes_comment_automation_conditions(automation, context):
-                continue
+            # if not passes_comment_automation_conditions(automation, context):
+            #     continue
             matching.append(automation)
         return matching
-
-    def _is_matching_comment_trigger(
-        self, automation: Dict[str, Any], trigger_type: str, context: Dict[str, Any]
-    ) -> bool:
-        return matches_comment_trigger(automation, trigger_type, context)
 
     def _execute_automation(
         self,
@@ -144,12 +140,12 @@ class CommentProcessor:
             logger.warning("Automation %s has no steps", automation_id)
             return
 
-        first_step = steps[0]
+        step = self._select_step_for_comment(steps, comment_data.get("comment_text") or "")
 
         logger.info(
-            "Executing automation %s, first step: %s",
+            "Executing automation %s, step: %s",
             automation_id,
-            first_step.get("id"),
+            step.get("id"),
         )
 
         message_context: Dict[str, Any] = {
@@ -163,19 +159,32 @@ class CommentProcessor:
             "account_id": account_id,
             "timestamp": datetime.utcnow().isoformat(),
         }
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Comment automation context automation_id=%s context=%s",
-                automation_id,
-                json.dumps(message_context, ensure_ascii=True, default=str),
-            )
         self._execute_step(
-            first_step,
+            step,
             automation,
             account_id,
             comment_data.get("from_id"),
             message_context,
         )
+
+    @staticmethod
+    def _select_step_for_comment(
+        steps: List[Dict[str, Any]], comment_text: str
+    ) -> Dict[str, Any]:
+        """
+        With multiple steps, pick the first whose optional ``match_keywords`` matches
+        the comment (same rules as ``trigger.keywords``). If no step sets
+        ``match_keywords``, or none match, use ``steps[0]``.
+        """
+        if len(steps) == 1:
+            return steps[0]
+        keyed = [s for s in steps if "match_keywords" in s]
+        if not keyed:
+            return steps[0]
+        for s in keyed:
+            if match_keywords(comment_text, s.get("match_keywords") or []):
+                return s
+        return steps[0]
 
     def _execute_step(
         self,
@@ -194,29 +203,15 @@ class CommentProcessor:
             contact_id,
         )
 
-        message = message_builder.build_comment_dm_from_step(
+        message = message_builder.build_message(
             step, context, automation_id=automation.get("id")
         )
         if not message:
-            logger.error(
-                "No message from step automation_id=%s step_id=%s",
-                automation.get("id"),
-                step.get("id"),
-            )
-            return
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Step message built automation_id=%s step_id=%s message=%s",
-                automation.get("id"),
-                step.get("id"),
-                json.dumps(message, ensure_ascii=True, default=str),
+            raise ValueError(
+                f"No message for automation {automation.get('id')} step {step.get('id')}"
             )
 
-        # Generic/carousel to recipient id only (Meta often rejects comment_id + template).
-        instagram_api.send_dm_sync(
-            account_id, contact_id, message, comment_id=None
-        )
+        instagram_api.send_dm_sync(account_id, contact_id, message)
         logger.info(
             "Comment-trigger DM sent automation_id=%s step_id=%s contact_id=%s",
             automation.get("id"),
@@ -232,29 +227,21 @@ class CommentProcessor:
             account_id, contact_id, step, context
         )
         apply_cooldown_from_automation(automation, str(contact_id))
-        logger.info(
-            "Completed on_deliver_actions automation_id=%s step_id=%s",
-            automation.get("id"),
-            step.get("id"),
-        )
 
     def _log_message_delivery(
         self, account_id: str, contact_id: str, step_id: str, message: Dict[str, Any], status: str
     ) -> None:
-        try:
-            container = cosmos_db.get_container_client(self.message_logs_container)
-            log_entry = {
-                "id": f"msg_{int(datetime.utcnow().timestamp())}_{contact_id}",
-                "account_id": account_id,
-                "contact_id": contact_id,
-                "step_id": step_id,
-                "message": message,
-                "status": status,
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-            container.create_item(log_entry)
-        except Exception as e:
-            logger.error("Error logging message delivery: %s", e, exc_info=True)
+        container = cosmos_db.get_container_client(self.message_logs_container)
+        log_entry = {
+            "id": f"msg_{int(datetime.utcnow().timestamp())}_{contact_id}",
+            "account_id": account_id,
+            "contact_id": contact_id,
+            "step_id": step_id,
+            "message": message,
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        container.create_item(log_entry)
 
 
 comment_processor = CommentProcessor()
