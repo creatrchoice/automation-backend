@@ -1,4 +1,5 @@
 """Shared helpers for post-send automation step follow-ups (on_deliver_actions)."""
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -18,8 +19,32 @@ def run_step_on_deliver_actions(
     """
     try:
         actions = step.get("on_deliver_actions") or []
+        logger.info(
+            "Running on_deliver_actions account_id=%s contact_id=%s step_id=%s action_count=%s comment_id=%s",
+            account_id,
+            contact_ig_id,
+            step.get("id"),
+            len(actions),
+            (context or {}).get("comment_id"),
+        )
+        logger.info(
+            "RAW on_deliver context step_id=%s context=%s",
+            step.get("id"),
+            json.dumps(context or {}, ensure_ascii=True, default=str),
+        )
         for action in actions:
-            logger.debug("Executing on-deliver action: %s", action.get("type"))
+            logger.info(
+                "Executing on-deliver action type=%s account_id=%s contact_id=%s step_id=%s",
+                action.get("type"),
+                account_id,
+                contact_ig_id,
+                step.get("id"),
+            )
+            logger.info(
+                "RAW on_deliver action step_id=%s action=%s",
+                step.get("id"),
+                json.dumps(action, ensure_ascii=True, default=str),
+            )
             execute_on_deliver_action(
                 action, account_id, contact_ig_id, context
             )

@@ -1,4 +1,5 @@
 """Comment webhook processor for handling Instagram comment events."""
+import json
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -321,6 +322,19 @@ class CommentProcessor:
                 "account_id": account_id,
                 "timestamp": datetime.utcnow().isoformat(),
             }
+            logger.info(
+                "Comment automation context prepared automation_id=%s account_id=%s from_id=%s comment_id=%s media_id=%s",
+                automation_id,
+                account_id,
+                comment_data.get("from_id"),
+                comment_data.get("comment_id"),
+                comment_data.get("media_id"),
+            )
+            logger.info(
+                "RAW comment automation context automation_id=%s context=%s",
+                automation_id,
+                json.dumps(message_context, ensure_ascii=True, default=str),
+            )
 
             # Execute the step — pass comment_id so DM is sent as reply to the comment
             self._execute_step(
@@ -367,6 +381,13 @@ class CommentProcessor:
             message = message_builder.build_message(
                 step, context, automation_id=automation.get("id")
             )
+            logger.info(
+                "Step message built automation_id=%s step_id=%s contact_id=%s message=%s",
+                automation.get("id"),
+                step.get("id"),
+                contact_id,
+                json.dumps(message, ensure_ascii=True, default=str),
+            )
 
             # Send message — for comment triggers, use comment_id as recipient
             # Instagram API requires: recipient: { comment_id: "..." } for comment-to-DM
@@ -379,8 +400,23 @@ class CommentProcessor:
                 # gracefully fall back to plain text.
                 if context.get("trigger_type") == "comment":
                     try:
+                        logger.info(
+                            "Sending comment private reply (primary) automation_id=%s step_id=%s contact_id=%s comment_id=%s message=%s",
+                            automation.get("id"),
+                            step.get("id"),
+                            contact_id,
+                            comment_id,
+                            json.dumps(sent_message, ensure_ascii=True, default=str),
+                        )
                         instagram_api.send_dm_sync(
                             account_id, contact_id, sent_message, comment_id=comment_id
+                        )
+                        logger.info(
+                            "Comment private reply sent (primary) automation_id=%s step_id=%s contact_id=%s comment_id=%s",
+                            automation.get("id"),
+                            step.get("id"),
+                            contact_id,
+                            comment_id,
                         )
                     except InstagramAPIError as send_err:
                         logger.warning(
@@ -395,12 +431,40 @@ class CommentProcessor:
                         )
                         if not sent_message:
                             raise
+                        logger.info(
+                            "Sending comment private reply (fallback-text) automation_id=%s step_id=%s contact_id=%s comment_id=%s message=%s",
+                            automation.get("id"),
+                            step.get("id"),
+                            contact_id,
+                            comment_id,
+                            json.dumps(sent_message, ensure_ascii=True, default=str),
+                        )
                         instagram_api.send_dm_sync(
                             account_id, contact_id, sent_message, comment_id=comment_id
                         )
+                        logger.info(
+                            "Comment private reply sent (fallback-text) automation_id=%s step_id=%s contact_id=%s comment_id=%s",
+                            automation.get("id"),
+                            step.get("id"),
+                            contact_id,
+                            comment_id,
+                        )
                 else:
+                    logger.info(
+                        "Sending DM (non-comment trigger) automation_id=%s step_id=%s contact_id=%s message=%s",
+                        automation.get("id"),
+                        step.get("id"),
+                        contact_id,
+                        json.dumps(sent_message, ensure_ascii=True, default=str),
+                    )
                     instagram_api.send_dm_sync(
                         account_id, contact_id, sent_message, comment_id=comment_id
+                    )
+                    logger.info(
+                        "DM sent (non-comment trigger) automation_id=%s step_id=%s contact_id=%s",
+                        automation.get("id"),
+                        step.get("id"),
+                        contact_id,
                     )
 
                 # Log message delivery
@@ -410,6 +474,12 @@ class CommentProcessor:
 
                 run_step_on_deliver_actions(
                     account_id, contact_id, step, context
+                )
+                logger.info(
+                    "Completed on_deliver_actions automation_id=%s step_id=%s contact_id=%s",
+                    automation.get("id"),
+                    step.get("id"),
+                    contact_id,
                 )
 
         except Exception as e:
