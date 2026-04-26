@@ -361,29 +361,51 @@ class CommentProcessor:
 
             # Import here to avoid circular dependencies
             from app.services.message_builder import message_builder
-            from app.services.instagram_api import instagram_api
+            from app.services.instagram_api import instagram_api, InstagramAPIError
 
             # Build message (step may store message_text / message_template / message on the step)
             message = message_builder.build_message(
                 step, context, automation_id=automation.get("id")
             )
 
-            if message and context.get("trigger_type") == "comment":
-                message = message_builder.coerce_to_text_for_comment_private_reply(
-                    message
-                )
-
             # Send message — for comment triggers, use comment_id as recipient
             # Instagram API requires: recipient: { comment_id: "..." } for comment-to-DM
             if message:
                 comment_id = context.get("comment_id") if context.get("trigger_type") == "comment" else None
-                instagram_api.send_dm_sync(
-                    account_id, contact_id, message, comment_id=comment_id
-                )
+                sent_message = message
+
+                # For comment-triggered private replies, try the full saved template first
+                # (including buttons). If Instagram rejects that shape for comment_id recipient,
+                # gracefully fall back to plain text.
+                if context.get("trigger_type") == "comment":
+                    try:
+                        instagram_api.send_dm_sync(
+                            account_id, contact_id, sent_message, comment_id=comment_id
+                        )
+                    except InstagramAPIError as send_err:
+                        logger.warning(
+                            "Comment private reply rejected rich template; falling back to text. "
+                            "automation_id=%s contact_id=%s error=%s",
+                            automation.get("id"),
+                            contact_id,
+                            send_err,
+                        )
+                        sent_message = message_builder.coerce_to_text_for_comment_private_reply(
+                            message
+                        )
+                        if not sent_message:
+                            raise
+                        instagram_api.send_dm_sync(
+                            account_id, contact_id, sent_message, comment_id=comment_id
+                        )
+                else:
+                    instagram_api.send_dm_sync(
+                        account_id, contact_id, sent_message, comment_id=comment_id
+                    )
 
                 # Log message delivery
                 self._log_message_delivery(
-                    account_id, contact_id, step.get("id"), message, "sent"
+                    account_id, contact_id, step.get("id"), sent_message, "sent"
                 )
 
                 run_step_on_deliver_actions(
