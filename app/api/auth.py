@@ -707,7 +707,8 @@ async def instagram_callback(
                     ),
                 )
 
-            if account_type not in ["CREATOR", "BUSINESS"]:
+            allowed_account_types = {"CREATOR", "MEDIA_CREATOR", "BUSINESS"}
+            if account_type not in allowed_account_types:
                 raise BadRequestError(
                     message=f"Unsupported account type: {account_type}",
                     user_title="Account Not Supported",
