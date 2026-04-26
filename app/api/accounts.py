@@ -88,6 +88,22 @@ async def list_accounts(
         ):
             total_count = item
 
+        logger.info(
+            "list_accounts response snapshot: total=%s returned=%s sample=%s",
+            total_count,
+            len(accounts),
+            [
+                {
+                    "id": a.get("id"),
+                    "username": a.get("username"),
+                    "account_type": a.get("account_type"),
+                    "permissions": a.get("permissions"),
+                    "webhook_fields": a.get("webhook_fields"),
+                }
+                for a in accounts[:3]
+            ],
+        )
+
         return {
             "accounts": accounts,
             "total": total_count,
