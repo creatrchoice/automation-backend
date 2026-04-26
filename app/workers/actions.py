@@ -1,4 +1,5 @@
 """On-deliver action executor for automation step completion."""
+import json
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -42,6 +43,14 @@ class ActionExecutor:
         try:
             action_type = action.get("type")
             logger.debug(f"Executing action: {action_type} for contact {contact_ig_id}")
+            logger.info(
+                "RAW execute_on_deliver action_type=%s account_id=%s contact_id=%s action=%s context=%s",
+                action_type,
+                account_id,
+                contact_ig_id,
+                json.dumps(action, ensure_ascii=True, default=str),
+                json.dumps(context or {}, ensure_ascii=True, default=str),
+            )
 
             if action_type == "add_tag":
                 self.execute_add_tag(action, account_id, contact_ig_id)
@@ -397,6 +406,15 @@ class ActionExecutor:
 
         comment_id = str(context["comment_id"])
         dedup_key = f"ig:public_comment_reply:{comment_id}"
+        logger.info(
+            "Preparing public comment reply account_id=%s contact_id=%s comment_id=%s dedup_key=%s action=%s context=%s",
+            account_id,
+            contact_ig_id,
+            comment_id,
+            dedup_key,
+            json.dumps(action, ensure_ascii=True, default=str),
+            json.dumps(context or {}, ensure_ascii=True, default=str),
+        )
 
         try:
             was_set = redis_client.set(
@@ -422,8 +440,19 @@ class ActionExecutor:
         try:
             from app.services.instagram_api import instagram_api
 
+            logger.info(
+                "Calling reply_to_instagram_comment_sync account_id=%s comment_id=%s text=%s",
+                account_id,
+                comment_id,
+                text,
+            )
             instagram_api.reply_to_instagram_comment_sync(
                 account_id, comment_id, text
+            )
+            logger.info(
+                "reply_to_instagram_comment_sync succeeded account_id=%s comment_id=%s",
+                account_id,
+                comment_id,
             )
         except Exception as e:
             logger.error(
