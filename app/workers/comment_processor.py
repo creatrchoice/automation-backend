@@ -211,7 +211,12 @@ class CommentProcessor:
                 f"No message for automation {automation.get('id')} step {step.get('id')}"
             )
 
-        instagram_api.send_dm_sync(account_id, contact_id, message)
+        instagram_api.send_dm_sync(
+            account_id,
+            contact_id,
+            message,
+            comment_id=context.get("comment_id"),
+        )
         logger.info(
             "Comment-trigger DM sent automation_id=%s step_id=%s contact_id=%s",
             automation.get("id"),

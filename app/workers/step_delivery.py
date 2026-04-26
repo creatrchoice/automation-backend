@@ -1,6 +1,7 @@
 """Shared helpers for post-send automation step follow-ups (on_deliver_actions)."""
 import json
 import logging
+import random
 from typing import Any, Dict, Optional
 
 from app.workers.actions import execute_on_deliver_action
@@ -23,7 +24,7 @@ def run_step_on_deliver_actions(
         variants = step.get("public_reply_variants") or []
         public_reply_text = ""
         if isinstance(variants, list) and variants:
-            public_reply_text = str(variants[0] or "").strip()
+            public_reply_text = str(random.choice(variants) or "").strip()
         if public_reply_text:
             actions = [
                 {
