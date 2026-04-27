@@ -139,7 +139,7 @@ async def create_automation(
 
 @router.get("")
 async def list_automations(
-    account_id: str,
+    account_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
     cosmos_client=Depends(get_cosmos_client),
     skip: int = Query(0, ge=0),
@@ -147,10 +147,10 @@ async def list_automations(
     status_filter: Optional[str] = Query(None),
 ):
     """
-    List all automations for an Instagram account.
+    List automations for the current user.
 
     Args:
-        account_id: Instagram account ID
+        account_id: Optional Instagram account ID filter
         current_user: Current authenticated user
         cosmos_client: Cosmos DB client
         skip: Number of results to skip
@@ -168,39 +168,49 @@ async def list_automations(
     """
     try:
         user_id = current_user.get("sub")
-
-        # Verify account ownership using partition key for correct Cosmos DB routing
-        accounts_container = await cosmos_client.get_async_container_client(
-            INSTAGRAM_TOKEN_CONTAINER
-        )
-        query = (
-            "SELECT * FROM accounts "
-            "WHERE accounts.id = @account_id AND accounts.user_id = @user_id"
-        )
-        accounts = []
-        async for item in accounts_container.query_items(
-            query=query,
-            parameters=[
-                {"name": "@account_id", "value": account_id},
-                {"name": "@user_id", "value": user_id},
-            ],
-            partition_key=user_id,
-        ):
-            accounts.append(item)
-
-        if not accounts:
+        if not user_id:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account not found or access denied",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid auth token",
             )
+
+        # If account filter is provided, ensure it belongs to this user.
+        if account_id:
+            accounts_container = await cosmos_client.get_async_container_client(
+                INSTAGRAM_TOKEN_CONTAINER
+            )
+            verify_query = (
+                "SELECT * FROM accounts "
+                "WHERE accounts.id = @account_id AND accounts.user_id = @user_id"
+            )
+            accounts = []
+            async for item in accounts_container.query_items(
+                query=verify_query,
+                parameters=[
+                    {"name": "@account_id", "value": account_id},
+                    {"name": "@user_id", "value": user_id},
+                ],
+                partition_key=user_id,
+            ):
+                accounts.append(item)
+
+            if not accounts:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Account not found or access denied",
+                )
 
         # Build query
         automations_container = await cosmos_client.get_async_container_client(
             AUTOMATIONS_CONTAINER
         )
 
-        where_clause = "WHERE automations.account_id = @account_id"
-        params = [{"name": "@account_id", "value": account_id}]
+        where_clause = "WHERE automations.user_id = @user_id"
+        params = [{"name": "@user_id", "value": user_id}]
+
+        if account_id:
+            where_clause += " AND automations.account_id = @account_id"
+            params.append({"name": "@account_id", "value": account_id})
 
         if status_filter:
             where_clause += " AND automations.status = @status"
@@ -216,6 +226,7 @@ async def list_automations(
         async for item in automations_container.query_items(
             query=query,
             parameters=params,
+            partition_key=user_id,
         ):
             automations.append(item)
 
@@ -225,6 +236,7 @@ async def list_automations(
         async for item in automations_container.query_items(
             query=count_query,
             parameters=params,
+            partition_key=user_id,
         ):
             total_count = item
 

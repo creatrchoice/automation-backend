@@ -8,15 +8,18 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 import httpx
+from pydantic import BaseModel, Field
 
 from app.core.config import dm_settings as settings
 from app.core.errors import (
+    BadRequestError,
     ExternalServiceError,
     ForbiddenError,
     InternalServerError,
 )
 from app.api.deps import get_current_user, get_cosmos_client, get_redis_client
 from app.db.cosmos_containers import CONTAINER_IG_ACCOUNTS
+from app.services.azure_blob_storage import AzureBlobConfigError, azure_blob_storage
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,38 @@ API_VERSION = settings.INSTAGRAM_API_VERSION
 
 # Fields we request from the Graph API
 MEDIA_FIELDS = "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp"
+
+
+class GenerateUploadUrlRequest(BaseModel):
+    filename: str = Field(..., min_length=1)
+    content_type: str = Field(default="image/jpeg")
+
+
+@router.post("/upload-url")
+async def generate_upload_url(
+    payload: GenerateUploadUrlRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate a short-lived Azure Blob signed URL for frontend image upload."""
+    user_id = current_user.get("sub")
+    if not user_id:
+        raise ForbiddenError(message="Missing user id in auth token")
+
+    content_type = (payload.content_type or "").strip().lower()
+    if not content_type.startswith("image/"):
+        raise BadRequestError(message="content_type must be an image MIME type")
+
+    try:
+        return azure_blob_storage.build_upload_url(
+            user_id=user_id,
+            filename=payload.filename.strip(),
+            content_type=content_type,
+        )
+    except (AzureBlobConfigError, ValueError) as e:
+        raise BadRequestError(message=str(e))
+    except Exception as e:
+        logger.error("Failed to generate image upload URL: %s", e)
+        raise InternalServerError(message="Failed to generate upload URL")
 
 
 async def _get_account_with_token(
