@@ -46,6 +46,18 @@ class DMAutomationSettings(BaseSettings):
         default="instagram-webhooks",
         description="Queue name for DM processing"
     )
+    AZURE_STORAGE_CONNECTION_STRING: str = Field(
+        default="",
+        description="Azure Blob Storage connection string"
+    )
+    AZURE_STORAGE_CONTAINER_NAME: str = Field(
+        default="dm-media",
+        description="Azure Blob Storage container for media uploads"
+    )
+    AZURE_STORAGE_SAS_EXPIRY_MINUTES: int = Field(
+        default=15,
+        description="Signed upload URL expiration in minutes"
+    )
 
     # ===== Azure Cosmos DB =====
     AZURE_COSMOS_ENDPOINT: str = Field(default="", description="Cosmos DB endpoint URL")
